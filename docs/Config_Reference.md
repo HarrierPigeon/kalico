@@ -1956,6 +1956,31 @@ explicit idle_timeout config section to change the default settings.
 #   The default is 600 seconds.
 ```
 
+### [host_watchdog]
+
+Host heartbeat watchdog. When enabled, the host process sends a
+periodic heartbeat to each MCU. If the host stops sending heartbeats
+(Python crash, OOM kill, USB unplug, OS hang, etc.) the MCU calls
+`shutdown("Host heartbeat lost")` -- the same emergency-stop path
+used by M112 -- within the configured timeout.
+
+This is **not** a substitute for hardware estop or M112; it covers
+the specific failure mode where the host is no longer in control of
+the machine but the MCU is still happily executing buffered moves.
+See `DESIGN.md` for the full threat model.
+
+```
+[host_watchdog]
+#timeout: 0.500
+#   Maximum time (in seconds) between heartbeats before the MCU
+#   shuts down. Heartbeats are sent every timeout/4 seconds. The
+#   default of 0.5 gives four heartbeats per timeout window, which
+#   tolerates typical CPython GC pauses and USB scheduling jitter
+#   without nuisance trips. Tighten to 0.2-0.3 for machines that
+#   need a smaller post-crash motion window; loosen if you observe
+#   spurious "Host heartbeat lost" shutdowns under load.
+```
+
 ## Optional G-Code features
 
 ### [virtual_sdcard]
