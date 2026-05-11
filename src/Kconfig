@@ -130,6 +130,10 @@ config WANT_BUTTONS
     bool
     depends on HAVE_GPIO
     default y
+config WANT_ESTOP_INPUT
+    bool
+    depends on HAVE_GPIO
+    default y
 config WANT_TMCUART
     bool
     depends on HAVE_GPIO
@@ -245,6 +249,9 @@ config WANT_GPIO_BUTTONS
     depends on HAVE_GPIO
 
 comment "----"
+config WANT_ESTOP_INPUT
+    bool "Support hardware emergency-stop GPIO input"
+    depends on HAVE_GPIO
 config WANT_TMCUART
     bool "Support Trinamic stepper motor driver UART communication"
     depends on HAVE_GPIO
