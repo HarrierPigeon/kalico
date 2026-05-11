@@ -65,6 +65,9 @@ struct serialqueue {
     uint64_t need_kick_clock;
     struct list_head notify_queue;
     double last_write_fail_time;
+    // Priority bypass lane (drained before pending_queues each tx pass)
+    struct list_head priority_queue;
+    int priority_bytes;
     // Received messages
     struct list_head receive_queue;
     // Fastreader support
@@ -588,11 +591,84 @@ check_send_command(struct serialqueue *sq, int pending, double eventtime)
     return idletime + (wantclock - ack_clock) / sq->ce.est_freq;
 }
 
+// Drain priority_queue: serialize each priority message into its own
+// framed block and write it directly.  Caller must hold sq->lock.
+// Each emitted block is also added to sent_queue so the ack/retransmit
+// state machine continues to function for priority messages.
+static void
+drain_priority_queue(struct serialqueue *sq, double eventtime)
+{
+    while (!list_empty(&sq->priority_queue)) {
+        struct queue_message *qm = list_first_entry(
+            &sq->priority_queue, struct queue_message, node);
+        list_del(&qm->node);
+        sq->priority_bytes -= qm->len;
+
+        // Build a one-message framed block: HEADER | payload | TRAILER
+        uint8_t buf[MESSAGE_MAX];
+        int len = MESSAGE_HEADER_SIZE;
+        if (qm->len > MESSAGE_MAX - MESSAGE_TRAILER_SIZE - MESSAGE_HEADER_SIZE) {
+            // Defensive: oversized payload (should not happen for an
+            // emergency_stop) - drop it rather than corrupt the stream.
+            errorf("Priority message too large (%d bytes); dropped", qm->len);
+            message_free(qm);
+            continue;
+        }
+        memcpy(&buf[len], qm->msg, qm->len);
+        len += qm->len;
+        len += MESSAGE_TRAILER_SIZE;
+        buf[MESSAGE_POS_LEN] = len;
+        buf[MESSAGE_POS_SEQ] = MESSAGE_DEST
+            | (sq->send_seq & MESSAGE_SEQ_MASK);
+        uint16_t crc = msgblock_crc16_ccitt(buf, len - MESSAGE_TRAILER_SIZE);
+        buf[len - MESSAGE_TRAILER_CRC] = crc >> 8;
+        buf[len - MESSAGE_TRAILER_CRC + 1] = crc & 0xff;
+        buf[len - MESSAGE_TRAILER_SYNC] = MESSAGE_SYNC;
+
+        // Write immediately (bypass batching).  Note: do_write is best
+        // effort - errors are reported but not fatal here.
+        do_write(sq, buf, len);
+        sq->bytes_write += len;
+        double idletime = (eventtime > sq->idle_time
+                           ? eventtime : sq->idle_time);
+        sq->idle_time = idletime + calculate_bittime(sq, len);
+
+        // Record sent block for ack/retransmit (option b)
+        struct queue_message *out = message_alloc();
+        memcpy(out->msg, buf, len);
+        out->len = len;
+        out->sent_time = eventtime;
+        out->receive_time = sq->idle_time;
+        if (list_empty(&sq->sent_queue))
+            pollreactor_update_timer(sq->pr, SQPT_RETRANSMIT
+                                     , sq->idle_time + sq->rto);
+        if (!sq->rtt_sample_seq)
+            sq->rtt_sample_seq = sq->send_seq;
+        sq->send_seq++;
+        sq->need_ack_bytes += len;
+        list_add_tail(&out->node, &sq->sent_queue);
+
+        // If the priority message requested a notification (unusual),
+        // park it on notify_queue using the same convention as the
+        // normal path.  Otherwise free it.
+        if (qm->notify_id) {
+            qm->req_clock = sq->send_seq - 1;
+            list_add_tail(&qm->node, &sq->notify_queue);
+        } else {
+            message_free(qm);
+        }
+    }
+}
+
 // Callback timer to send data to the serial port
 static double
 command_event(struct serialqueue *sq, double eventtime)
 {
     pthread_mutex_lock(&sq->lock);
+    // Drain the priority lane FIRST so urgent messages (e.g.
+    // emergency_stop) skip ahead of any pending normal-traffic batch.
+    if (!list_empty(&sq->priority_queue))
+        drain_priority_queue(sq, eventtime);
     uint8_t buf[MESSAGE_MAX * MAX_PENDING_BLOCKS];
     int buflen = 0;
     double waketime;
@@ -673,6 +749,7 @@ serialqueue_alloc(int serial_fd, char serial_fd_type, int client_id)
     list_init(&sq->sent_queue);
     list_init(&sq->receive_queue);
     list_init(&sq->notify_queue);
+    list_init(&sq->priority_queue);
     list_init(&sq->fast_readers);
 
     // Debugging
@@ -725,6 +802,7 @@ serialqueue_free(struct serialqueue *sq)
     message_queue_free(&sq->sent_queue);
     message_queue_free(&sq->receive_queue);
     message_queue_free(&sq->notify_queue);
+    message_queue_free(&sq->priority_queue);
     message_queue_free(&sq->old_sent);
     message_queue_free(&sq->old_receive);
     while (!list_empty(&sq->pending_queues)) {
@@ -844,6 +922,34 @@ serialqueue_send(struct serialqueue *sq, struct command_queue *cq, uint8_t *msg
     qm->req_clock = req_clock;
     qm->notify_id = notify_id;
     serialqueue_send_one(sq, cq, qm);
+}
+
+// Schedule the transmission of a message via the priority bypass
+// lane.  The message is placed on a global priority_queue and the
+// background thread is kicked immediately.  It is serialized into
+// its own framed block (skipping any pending batched normal
+// commands) on the next command_event tick and is tracked in
+// sent_queue for ack/retransmit purposes.  No command_queue is used
+// and min/req clock are not consulted.
+void __visible
+serialqueue_send_priority(struct serialqueue *sq, uint8_t *msg, int len)
+{
+    if (len <= 0 || len > MESSAGE_PAYLOAD_MAX)
+        return;
+    struct queue_message *qm = message_fill(msg, len);
+    qm->min_clock = 0;
+    qm->req_clock = 0;
+    qm->notify_id = 0;
+
+    pthread_mutex_lock(&sq->lock);
+    list_add_tail(&qm->node, &sq->priority_queue);
+    sq->priority_bytes += len;
+    // Force immediate kick of the bg thread regardless of clock
+    sq->need_kick_clock = 0;
+    pollreactor_update_timer(sq->pr, SQPT_COMMAND, PR_NOW);
+    pthread_mutex_unlock(&sq->lock);
+
+    kick_bg_thread(sq);
 }
 
 // Return a message read from the serial port (or wait for one if none

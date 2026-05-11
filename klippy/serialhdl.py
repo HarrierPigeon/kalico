@@ -380,6 +380,19 @@ class SerialReader:
             self.serialqueue, cmd_queue, cmd, len(cmd), minclock, reqclock, 0
         )
 
+    def raw_send_priority(self, cmd):
+        # Fire a single command via the C-level priority bypass lane.
+        # No command_queue / min_clock / req_clock - the message is
+        # serialized into its own framed block and written to the
+        # serial fd immediately, skipping any pending normal batch.
+        # Used for emergency_stop and similar urgent commands.
+        self._check_noncritical_disconnected()
+        if self.serialqueue is None:
+            return
+        self.ffi_lib.serialqueue_send_priority(
+            self.serialqueue, cmd, len(cmd)
+        )
+
     def raw_send_wait_ack(self, cmd, minclock, reqclock, cmd_queue):
         self._check_noncritical_disconnected()
         if self.serialqueue is None:

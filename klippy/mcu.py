@@ -1400,7 +1400,20 @@ class MCU:
             self._is_shutdown and not force
         ):
             return
-        self._emergency_stop_cmd.send()
+        # Route emergency_stop through the C-level priority bypass
+        # lane so the encoded bytes skip any pending batched
+        # normal-traffic block (queue_step, etc.) and hit the USB
+        # fd on the very next command_event tick.  Falls back to the
+        # normal send path if the priority hook is unavailable
+        # (e.g. older compiled c_helper.so during dev rebuilds).
+        cmd_bytes = self._emergency_stop_cmd._cmd.encode(())
+        raw_send_priority = getattr(
+            self._serial, "raw_send_priority", None
+        )
+        if raw_send_priority is not None:
+            raw_send_priority(cmd_bytes)
+        else:
+            self._emergency_stop_cmd.send()
 
     def _restart_arduino(self):
         logging.info("Attempting MCU '%s' reset", self._name)

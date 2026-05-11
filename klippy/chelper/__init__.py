@@ -205,6 +205,8 @@ defs_serialqueue = """
     void serialqueue_send(struct serialqueue *sq, struct command_queue *cq
         , uint8_t *msg, int len, uint64_t min_clock, uint64_t req_clock
         , uint64_t notify_id);
+    void serialqueue_send_priority(struct serialqueue *sq
+        , uint8_t *msg, int len);
     void serialqueue_pull(struct serialqueue *sq
         , struct pull_queue_message *pqm);
     void serialqueue_set_wire_frequency(struct serialqueue *sq
