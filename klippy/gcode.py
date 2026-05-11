@@ -578,6 +578,17 @@ class GCodeIO:
         pending_commands = self.pending_commands
         pending_commands.extend(lines)
         self.pipe_is_active = True
+        # Design F fast path: ALWAYS scan freshly-read lines for M112 before
+        # any other processing.  M112 is idempotent (invoke_shutdown checks
+        # in_shutdown_state) so double-firing is safe.  Previously this scan
+        # was gated by `1 < len(pending_commands) < 20`, which skipped the
+        # check when there was a single pending command (it might BE M112)
+        # and when the buffer was large (which is exactly when latency hurts
+        # the most).
+        for line in lines:
+            if self.m112_r.match(line) is not None:
+                self.gcode.cmd_M112(None)
+                break
         # Special handling for debug file input EOF
         if not data and self.is_fileinput:
             if not self.is_processing_data:
@@ -587,11 +598,6 @@ class GCodeIO:
             pending_commands.append("")
         # Handle case where multiple commands pending
         if self.is_processing_data or len(pending_commands) > 1:
-            if len(pending_commands) < 20:
-                # Check for M112 out-of-order
-                for line in lines:
-                    if self.m112_r.match(line) is not None:
-                        self.gcode.cmd_M112(None)
             if self.is_processing_data:
                 if len(pending_commands) >= 20:
                     # Stop reading input

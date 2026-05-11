@@ -858,7 +858,14 @@ class MCU:
             "klippy:mcu_identify", self._mcu_identify
         )
         printer.register_event_handler("klippy:connect", self._connect)
-        printer.register_event_handler("klippy:shutdown", self._shutdown)
+        # Design F: register _shutdown as a *priority* klippy:shutdown
+        # handler so the emergency_stop bytes are pushed onto serialqueue
+        # before any other handlers (heaters, sensors, tmc, etc.) get to
+        # run.  Saves tens of ms of Python work in the critical path
+        # between M112 arriving and the firmware being told to halt.
+        printer.register_priority_event_handler(
+            "klippy:shutdown", self._shutdown
+        )
         printer.register_event_handler("klippy:disconnect", self._disconnect)
         printer.register_event_handler("klippy:ready", self._ready)
 

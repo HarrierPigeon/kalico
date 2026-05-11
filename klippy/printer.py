@@ -474,6 +474,20 @@ class Printer:
         logging.error("Transition to shutdown state: %s", msg)
         self.in_shutdown_state = True
         self._set_state("%s%s" % (msg, message_shutdown))
+        # Design F: belt + suspenders.  Even though MCU._shutdown is
+        # registered as a *priority* klippy:shutdown handler (and thus runs
+        # first in the loop below), defensively invoke every MCU's
+        # _shutdown() directly here.  This guarantees the emergency_stop
+        # bytes hit serialqueue before we spend any time iterating the
+        # (potentially long) handler list, even if priority registration is
+        # somehow bypassed (e.g. a future refactor, third-party module that
+        # uses plain register_event_handler).  MCU._shutdown is idempotent
+        # — it checks `self._is_shutdown` and bails on repeat calls.
+        for _name, mcu_obj in self.lookup_objects(module="mcu"):
+            try:
+                mcu_obj._shutdown()
+            except:
+                logging.exception("Exception during fast-path MCU shutdown")
         for cb in self.event_handlers.get("klippy:shutdown", []):
             try:
                 cb()
@@ -490,6 +504,15 @@ class Printer:
 
     def register_event_handler(self, event, callback):
         self.event_handlers.setdefault(event, []).append(callback)
+
+    def register_priority_event_handler(self, event, callback):
+        # Like register_event_handler but inserts the callback at the front
+        # of the dispatch list, so it runs before any handlers registered
+        # via the normal API.  Used by MCU._shutdown so that the
+        # emergency_stop bytes are pushed onto serialqueue *before* any
+        # other Python work (heater shutdowns, sensor cleanup, etc.) when
+        # klippy:shutdown is dispatched.
+        self.event_handlers.setdefault(event, []).insert(0, callback)
 
     def send_event(self, event, *params):
         return [cb(*params) for cb in self.event_handlers.get(event, [])]
