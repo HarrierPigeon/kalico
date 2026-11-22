@@ -343,3 +343,17 @@ def test_status_only_takes_claimed_options(config_root: ConfigRoot, run_gcode):
         ASSERT TEST='{printer.configfile.reload_pending.extruder.nozzle_diameter == "0.6"}'
         """
     )
+
+
+def test_reload_resonance_tester(config_root: ConfigRoot, run_gcode):
+    run_gcode(
+        """
+        TEST_COPY_FILE SRC=tuning_resonance.cfg DEST=tuning.cfg
+        RELOAD_CONFIG
+        ASSERT TEST='{printer.configfile.reload_pending == {}}'
+        ASSERT_PY TEST='printer.lookup_object("resonance_tester").generator.vibration_generator.min_freq == 10'
+        ASSERT_PY TEST='printer.lookup_object("resonance_tester").generator.vibration_generator.max_freq == 120'
+        ASSERT_PY TEST='printer.lookup_object("resonance_tester").generator.vibration_generator.accel_per_hz == 60'
+        ASSERT_PY TEST='len(printer.lookup_object("resonance_tester").probe_points) == 2'
+        """
+    )

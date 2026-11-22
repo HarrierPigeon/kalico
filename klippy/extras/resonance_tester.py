@@ -307,6 +307,20 @@ class ResonanceTestExecutor:
             toolhead.move([X + decel_X, Y + decel_Y] + tpos[2:], abs(last_v))
 
 
+# Options RELOAD_CONFIG can apply live (ResonanceTester)
+RELOAD_TEST_OPTIONS = (
+    "move_speed",
+    "min_freq",
+    "max_freq",
+    "accel_per_hz",
+    "hz_per_sec",
+    "sweeping_accel",
+    "sweeping_period",
+    "max_smoothing",
+    "probe_points",
+)
+
+
 class ResonanceTester:
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -339,9 +353,12 @@ class ResonanceTester:
                 " accel_chip, or accel_chip_x/accel_chip_y must be specified."
             )
 
-        self.max_smoothing = config.getfloat("max_smoothing", None, minval=0.05)
-        self.probe_points = config.getlists(
-            "probe_points", seps=(",", "\n"), parser=float, count=3
+        self.max_smoothing, self.probe_points = self._read_test_options(config)
+        # RELOAD_CONFIG support; these only matter when a test starts
+        config.register_reload_handler(
+            self._reload_test_options,
+            RELOAD_TEST_OPTIONS,
+            mid_print_safe=True,
         )
 
         self.gcode = self.printer.lookup_object("gcode")
@@ -361,6 +378,28 @@ class ResonanceTester:
             desc=self.cmd_SHAPER_CALIBRATE_help,
         )
         self.printer.register_event_handler("klippy:connect", self.connect)
+
+    @staticmethod
+    def _read_test_options(config):
+        max_smoothing = config.getfloat("max_smoothing", None, minval=0.05)
+        probe_points = config.getlists(
+            "probe_points", seps=(",", "\n"), parser=float, count=3
+        )
+        return max_smoothing, probe_points
+
+    def _reload_test_options(self, config, changed):
+        # Nothing sets these at run-time, so take them all from the file
+        move_speed = config.getfloat("move_speed", 50.0, above=0.0)
+        generator = SweepingVibrationsTestGenerator(config)
+        max_smoothing, probe_points = self._read_test_options(config)
+
+        def apply():
+            self.move_speed = move_speed
+            self.generator = generator
+            self.max_smoothing = max_smoothing
+            self.probe_points = probe_points
+
+        return apply
 
     def connect(self):
         self.accel_chips = []
