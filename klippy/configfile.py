@@ -399,6 +399,11 @@ class PrinterConfig:
                 self.cmd_RELOAD_CONFIG,
                 desc=self.cmd_RELOAD_CONFIG_help,
             )
+            gcode.register_command(
+                "SET_CONFIG",
+                self.cmd_SET_CONFIG,
+                desc=self.cmd_SET_CONFIG_help,
+            )
 
     def get_printer(self):
         return self.printer
@@ -771,11 +776,23 @@ class PrinterConfig:
         handler; its apply function creates the object."""
         self.reloader.register_factory(prefix, callback, mid_print_safe)
 
-    def note_reloaded(self, changes, tracking):
+    def note_reloaded(self, changes, tracking, raw=True):
         """Update get_status() after RELOAD_CONFIG applied `changes`;
-        `tracking` holds the values the applied handlers read."""
+        `tracking` holds the values the applied handlers read. `raw` is
+        False when the file itself did not change (SET_CONFIG)."""
         if not changes:
             return
+        if raw:
+            self._note_raw_config(changes)
+        settings = dict(self.status_settings)
+        for (section, option), value in tracking.items():
+            if settings.get(section, {}).get(option) == value:
+                continue
+            settings[section] = dict(settings.get(section, {}))
+            settings[section][option] = value
+        self.status_settings = settings
+
+    def _note_raw_config(self, changes):
         raw = dict(self.status_raw_config)
         for c in changes:
             opts = raw[c.section] = dict(raw.get(c.section, {}))
@@ -786,13 +803,6 @@ class PrinterConfig:
             else:
                 opts[c.option] = c.new
         self.status_raw_config = raw
-        settings = dict(self.status_settings)
-        for (section, option), value in tracking.items():
-            if settings.get(section, {}).get(option) == value:
-                continue
-            settings[section] = dict(settings.get(section, {}))
-            settings[section][option] = value
-        self.status_settings = settings
 
     cmd_RELOAD_CONFIG_help = (
         "Apply config file edits that can take effect without a restart"
@@ -800,6 +810,14 @@ class PrinterConfig:
 
     def cmd_RELOAD_CONFIG(self, gcmd):
         self.reloader.run(gcmd)
+
+    cmd_SET_CONFIG_help = (
+        "Change a config option live, where it can take effect without a"
+        " restart"
+    )
+
+    def cmd_SET_CONFIG(self, gcmd):
+        self.reloader.run_set(gcmd)
 
     # Autosave functions
     def set(self, section, option, value):

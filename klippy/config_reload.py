@@ -348,7 +348,10 @@ class ConfigReloader:
         call.changes = []
 
     # Applying
-    def apply_plan(self, plan):
+    def apply_plan(self, plan, file_edit=True):
+        """Apply the changes in `plan`. `file_edit` is False for SET_CONFIG,
+        where the file did not change: the baseline and the raw config in
+        get_status() stay as they are."""
         failures = []
         applied = []
         tracking = {}
@@ -370,6 +373,9 @@ class ConfigReloader:
             tracking.update(call.tracking)
         for c in applied:
             c.applied = True
+        if not file_edit:
+            self.pconfig.note_reloaded(applied, tracking, raw=False)
+            return failures
         baseline = self._get_baseline()
         for c in plan.changes:
             if c.status != APPLY:
@@ -419,6 +425,62 @@ class ConfigReloader:
             lines.append(title)
             lines.extend("  " + c.describe() for c in changes)
         return "\n".join(lines)
+
+    # SET_CONFIG
+    def run_set(self, gcmd):
+        section = gcmd.get("SECTION")
+        option = gcmd.get("OPTION").lower()
+        value = gcmd.get("VALUE")
+        save = gcmd.get_int("SAVE", 0, minval=0, maxval=1)
+        force = gcmd.get_int("FORCE", 0, minval=0, maxval=1)
+        baseline = self._get_baseline()
+        matches = [s for s in baseline if s.lower() == section.lower()]
+        if not matches:
+            raise gcmd.error("SET_CONFIG: unknown section '%s'" % (section,))
+        section = matches[0]
+        # The running values with this one option changed
+        fileconfig = configparser.RawConfigParser(
+            strict=False, interpolation=None
+        )
+        for name, options in baseline.items():
+            fileconfig.add_section(name)
+            for opt, val in options.items():
+                fileconfig.set(name, opt, val)
+        fileconfig.set(section, option, value)
+        running = self.pconfig.get_running_config()
+        new_config = type(running)(self.printer, fileconfig, {}, "printer")
+        plan = ReloadPlan(new_config, self._is_printing() and not force)
+        new = dict(baseline[section])
+        new[option] = value
+        self._plan_section(plan, section, baseline[section], new)
+        what = "[%s] %s" % (section, option)
+        if not plan.changes:
+            gcmd.respond_info("SET_CONFIG: %s is already %s" % (what, value))
+            return
+        change = plan.changes[0]
+        for call in plan.calls:
+            self._check_call(plan, call)
+        if plan.errors:
+            raise gcmd.error("SET_CONFIG: %s" % ("\n".join(plan.errors),))
+        reason = " (%s)" % (change.reason,) if change.reason else ""
+        if change.status == RESTART:
+            raise gcmd.error(
+                "SET_CONFIG: %s can't be changed without a restart%s"
+                % (what, reason)
+            )
+        if change.status == BLOCKED:
+            raise gcmd.error(
+                "SET_CONFIG: %s is not changed during a print%s;"
+                " use FORCE=1 to change it anyway" % (what, reason)
+            )
+        failures = self.apply_plan(plan, file_edit=False)
+        if failures:
+            raise gcmd.error("SET_CONFIG: %s" % ("\n".join(failures),))
+        msg = "SET_CONFIG: %s = %s" % (what, value)
+        if save:
+            self.pconfig.set(section, option, value)
+            msg += "\nRun SAVE_CONFIG to write it to the config file."
+        gcmd.respond_info(msg)
 
     # Command
     def run(

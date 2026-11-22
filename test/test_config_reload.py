@@ -263,3 +263,36 @@ def test_reload_refused_handler_leaves_status(
         ASSERT TEST='{printer.configfile.reload_pending == {}}'
         """
     )
+
+
+def test_set_config(config_root: ConfigRoot, run_gcode):
+    run_gcode(
+        """
+        SET_CONFIG SECTION=printer OPTION=max_accel VALUE=4000
+        ASSERT TEST='{printer.toolhead.max_accel == 4000}'
+        ASSERT TEST='{printer.configfile.settings.printer.max_accel == 4000}'
+        # The file didn't change: the raw config and pending stay
+        ASSERT TEST='{printer.configfile.config.printer.max_accel == "3000"}'
+        ASSERT TEST='{printer.configfile.save_config_pending == False}'
+        # Sections with spaces, and SAVE=1
+        SET_CONFIG SECTION="tmc2209 stepper_x" OPTION=run_current VALUE=0.7 SAVE=1
+        ASSERT TEST='{printer["tmc2209 stepper_x"].run_current > 0.65}'
+        ASSERT TEST='{printer.configfile.save_config_pending_items["tmc2209 stepper_x"].run_current == "0.7"}'
+        SET_CONFIG SECTION="gcode_macro TEST_MACRO" OPTION=variable_count VALUE=5
+        ASSERT TEST='{printer["gcode_macro TEST_MACRO"].count == 5}'
+
+        # Refusals
+        ASSERT_ERROR GCODE='SET_CONFIG SECTION=stepper_x OPTION=position_max VALUE=210' MATCH='without a restart'
+        ASSERT_ERROR GCODE='SET_CONFIG SECTION=printer OPTION=max_accel VALUE=-1' MATCH='must be above'
+        ASSERT_ERROR GCODE='SET_CONFIG SECTION=nosuch OPTION=x VALUE=1' MATCH='unknown section'
+        ASSERT TEST='{printer.toolhead.max_accel == 4000}'
+        TEST_PY CODE='printer.lookup_object("print_stats").note_start()'
+        ASSERT_ERROR GCODE='SET_CONFIG SECTION="tmc2209 stepper_x" OPTION=driver_tbl VALUE=1' MATCH='FORCE=1'
+        SET_CONFIG SECTION="tmc2209 stepper_x" OPTION=driver_tbl VALUE=1 FORCE=1
+        ASSERT_PY TEST='printer.lookup_object("tmc2209 stepper_x").fields.get_field("tbl") == 1'
+
+        # A RELOAD_CONFIG with no file edits keeps the live values
+        RELOAD_CONFIG
+        ASSERT TEST='{printer.toolhead.max_accel == 4000}'
+        """
+    )

@@ -385,6 +385,15 @@ Everything else, including new or removed sections (other than new macros)
 and anything configured into the micro-controller (pins, `min_temp` and
 `max_temp`, `microsteps`, ...), needs a `RESTART`.
 
+#### SET_CONFIG
+`SET_CONFIG SECTION=<section> OPTION=<option> VALUE=<value> [SAVE=1]
+[FORCE=1]`: Changes one config option live, through the same support as
+[RELOAD_CONFIG](#reload_config), so it works for the options listed
+there and checks the value the same way. Quote a section name that
+contains a space: `SECTION="tmc2209 stepper_x"`. The config file is not
+changed; with `SAVE=1` the value is queued for `SAVE_CONFIG`. During a
+print, options that are not safe mid-print need `FORCE=1`.
+
 ### [delayed_gcode]
 
 The following command is enabled if a
