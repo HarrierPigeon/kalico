@@ -6,7 +6,7 @@
 import collections
 import math
 
-from . import chelper
+from . import chelper, config_reload
 
 
 class error(Exception):
@@ -420,6 +420,19 @@ def parse_step_distance(config, units_in_radians=None, note_valid=False):
 
 # A motor control "rail" with one (or more) steppers and one (or more)
 # endstops.
+# Rail options RELOAD_CONFIG can apply live (PrinterRail._reload_homing)
+RELOAD_HOMING_OPTIONS = (
+    "position_endstop",
+    "homing_speed",
+    "second_homing_speed",
+    "homing_retract_speed",
+    "homing_retract_dist",
+    "homing_positive_dir",
+    "min_home_dist",
+    "homing_accel",
+)
+
+
 class PrinterRail:
     def __init__(
         self,
@@ -441,7 +454,12 @@ class PrinterRail:
         self.calc_position_from_coord = mcu_stepper.calc_position_from_coord
         # Primary endstop position
         mcu_endstop = self.endstops[0][0]
-        if hasattr(mcu_endstop, "get_position_endstop"):
+        self._need_position_minmax = need_position_minmax
+        self._default_position_endstop = default_position_endstop
+        self._endstop_has_position = hasattr(
+            mcu_endstop, "get_position_endstop"
+        )
+        if self._endstop_has_position:
             self.position_endstop = mcu_endstop.get_position_endstop()
         elif default_position_endstop is None:
             self.position_endstop = config.getfloat("position_endstop")
@@ -476,55 +494,106 @@ class PrinterRail:
         self.use_sensorless_homing = config.getboolean(
             "use_sensorless_homing", endstop_is_virtual
         )
+        (
+            self.homing_speed,
+            self.second_homing_speed,
+            self.homing_retract_speed,
+            self.homing_retract_dist,
+            self.homing_positive_dir,
+            self.min_home_dist,
+            self.homing_accel,
+        ) = self._read_homing(config, self.position_endstop)
+        # RELOAD_CONFIG support; these are only used when homing
+        config.register_reload_handler(
+            self._reload_homing, RELOAD_HOMING_OPTIONS, mid_print_safe=True
+        )
 
-        self.homing_speed = config.getfloat("homing_speed", 5.0, above=0.0)
-
-        default_second_homing_speed = self.homing_speed / 2.0
+    def _read_homing(self, config, position_endstop):
+        homing_speed = config.getfloat("homing_speed", 5.0, above=0.0)
+        default_second_homing_speed = homing_speed / 2.0
         if self.use_sensorless_homing:
-            default_second_homing_speed = self.homing_speed
-
-        self.second_homing_speed = config.getfloat(
+            default_second_homing_speed = homing_speed
+        second_homing_speed = config.getfloat(
             "second_homing_speed", default_second_homing_speed, above=0.0
         )
-        self.homing_retract_speed = config.getfloat(
-            "homing_retract_speed", self.homing_speed, above=0.0
+        homing_retract_speed = config.getfloat(
+            "homing_retract_speed", homing_speed, above=0.0
         )
-        self.homing_retract_dist = config.getfloat(
+        homing_retract_dist = config.getfloat(
             "homing_retract_dist", 5.0, minval=0.0
         )
-        self.homing_positive_dir = config.getboolean(
-            "homing_positive_dir", None
+        homing_positive_dir = config.getboolean("homing_positive_dir", None)
+        min_home_dist = config.getfloat(
+            "min_home_dist", homing_retract_dist, minval=0.0
         )
-
-        self.min_home_dist = config.getfloat(
-            "min_home_dist", self.homing_retract_dist, minval=0.0
-        )
-
-        self.homing_accel = config.getfloat("homing_accel", None, above=0.0)
-
-        if self.homing_positive_dir is None:
+        homing_accel = config.getfloat("homing_accel", None, above=0.0)
+        if homing_positive_dir is None:
             axis_len = self.position_max - self.position_min
-            if self.position_endstop <= self.position_min + axis_len / 4.0:
-                self.homing_positive_dir = False
-            elif self.position_endstop >= self.position_max - axis_len / 4.0:
-                self.homing_positive_dir = True
+            if position_endstop <= self.position_min + axis_len / 4.0:
+                homing_positive_dir = False
+            elif position_endstop >= self.position_max - axis_len / 4.0:
+                homing_positive_dir = True
             else:
                 raise config.error(
                     "Unable to infer homing_positive_dir in section '%s'"
                     % (config.get_name(),)
                 )
-            config.getboolean("homing_positive_dir", self.homing_positive_dir)
+            config.getboolean("homing_positive_dir", homing_positive_dir)
         elif (
-            self.homing_positive_dir
-            and self.position_endstop == self.position_min
+            homing_positive_dir and position_endstop == self.position_min
         ) or (
-            not self.homing_positive_dir
-            and self.position_endstop == self.position_max
+            not homing_positive_dir and position_endstop == self.position_max
         ):
             raise config.error(
                 "Invalid homing_positive_dir / position_endstop in '%s'"
                 % (config.get_name(),)
             )
+        return (
+            homing_speed,
+            second_homing_speed,
+            homing_retract_speed,
+            homing_retract_dist,
+            homing_positive_dir,
+            min_home_dist,
+            homing_accel,
+        )
+
+    def _reload_homing(self, config, changed):
+        # RELOAD_CONFIG: takes effect at the next homing
+        position_endstop = self.position_endstop
+        if "position_endstop" in changed:
+            if self._endstop_has_position:
+                raise config_reload.NeedsRestart("set by the endstop")
+            if not self._need_position_minmax:
+                raise config_reload.NeedsRestart("also sets the axis range")
+            if self._default_position_endstop is None:
+                position_endstop = config.getfloat("position_endstop")
+            else:
+                position_endstop = config.getfloat(
+                    "position_endstop", self._default_position_endstop
+                )
+            if not self.position_min <= position_endstop <= self.position_max:
+                raise config.error(
+                    "position_endstop in section '%s' must be between"
+                    " position_min and position_max" % config.get_name()
+                )
+        homing = self._read_homing(config, position_endstop)
+
+        def apply():
+            # Nothing else sets these at run-time, except position_endstop
+            # (trad_rack), which only changes when it was edited
+            self.position_endstop = position_endstop
+            (
+                self.homing_speed,
+                self.second_homing_speed,
+                self.homing_retract_speed,
+                self.homing_retract_dist,
+                self.homing_positive_dir,
+                self.min_home_dist,
+                self.homing_accel,
+            ) = homing
+
+        return apply
 
     def get_tmc_current_helpers(self):
         if self._tmc_current_helpers is None:

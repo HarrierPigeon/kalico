@@ -43,6 +43,8 @@ class FieldHelper:
         }
         # Fields read from "driver_<FIELD>" config options, with defaults
         self.config_fields = {}
+        # Velocity threshold options in use -> the helper that sets them
+        self.velocity_options = {}
 
     def lookup_register(self, field_name, default=None):
         return self.field_to_register.get(field_name, default)
@@ -480,6 +482,10 @@ class TMCCommandHelper:
         config.register_reload_handler(
             self._reload_fields, self._is_reloadable_field
         )
+        config.register_reload_handler(
+            self._reload_velocities,
+            lambda option: option in self.fields.velocity_options,
+        )
 
     def _init_registers(self, print_time=None):
         if self.init_callback is not None:
@@ -547,6 +553,39 @@ class TMCCommandHelper:
                 reg_name = self.fields.lookup_register(field)
                 if reg_name not in reg_names:
                     reg_names.append(reg_name)
+            print_time = self.printer.lookup_object(
+                "toolhead"
+            ).get_last_move_time()
+            for reg_name in reg_names:
+                self.mcu_tmc.set_register(
+                    reg_name, self.fields.registers[reg_name], print_time
+                )
+
+        return apply
+
+    def _reload_velocities(self, config, changed):
+        # stealthchop/coolstep/high velocity thresholds; they are converted
+        # with the stepper's current step distance
+        if self.mcu_tmc.get_tmc_frequency() is None:
+            raise config_reload.NeedsRestart("driver has no TSTEP clock")
+        velocities = {
+            option: config.getfloat(option, None, minval=0.0)
+            for option in changed
+        }
+
+        def apply():
+            reg_names = []
+            for option, velocity in velocities.items():
+                value = None
+                if velocity is not None:
+                    value = TMCtstepHelper(
+                        self.mcu_tmc, velocity, pstepper=self.stepper
+                    )
+                setter = self.fields.velocity_options[option]
+                for field in setter(self.fields, value):
+                    reg_name = self.fields.lookup_register(field)
+                    if reg_name not in reg_names:
+                        reg_names.append(reg_name)
             print_time = self.printer.lookup_object(
                 "toolhead"
             ).get_last_move_time()
@@ -1104,21 +1143,25 @@ def TMCtstepHelper(mcu_tmc, velocity, pstepper=None, config=None):
 # Helper to configure stealthChop-spreadCycle transition velocity
 def TMCStealthchopHelper(config, mcu_tmc):
     fields = mcu_tmc.get_fields()
-    en_pwm_mode = False
+    fields.velocity_options["stealthchop_threshold"] = set_stealthchop_fields
     velocity = config.getfloat("stealthchop_threshold", None, minval=0.0)
-    tpwmthrs = 0xFFFFF
-
+    tpwmthrs = None
     if velocity is not None:
-        en_pwm_mode = True
         tpwmthrs = TMCtstepHelper(mcu_tmc, velocity, config=config)
-    fields.set_field("tpwmthrs", tpwmthrs)
+    set_stealthchop_fields(fields, tpwmthrs)
 
+
+def set_stealthchop_fields(fields, tpwmthrs):
+    # tpwmthrs is None for spreadCycle only
+    en_pwm_mode = tpwmthrs is not None
+    fields.set_field("tpwmthrs", tpwmthrs if en_pwm_mode else 0xFFFFF)
     reg = fields.lookup_register("en_pwm_mode", None)
     if reg is not None:
         fields.set_field("en_pwm_mode", en_pwm_mode)
     else:
         # TMC2208 uses en_spreadCycle
         fields.set_field("en_spreadcycle", not en_pwm_mode)
+    return ["tpwmthrs", "en_pwm_mode" if reg is not None else "en_spreadcycle"]
 
 
 class BaseTMCCurrentHelper:
@@ -1242,19 +1285,31 @@ class BaseTMCCurrentHelper:
 # Helper to configure StallGuard and CoolStep minimum velocity
 def TMCVcoolthrsHelper(config, mcu_tmc):
     fields = mcu_tmc.get_fields()
+    fields.velocity_options["coolstep_threshold"] = set_tcoolthrs_field
     velocity = config.getfloat("coolstep_threshold", None, minval=0.0)
-    tcoolthrs = 0
+    tcoolthrs = None
     if velocity is not None:
         tcoolthrs = TMCtstepHelper(mcu_tmc, velocity, config=config)
-    fields.set_field("tcoolthrs", tcoolthrs)
+    set_tcoolthrs_field(fields, tcoolthrs)
+
+
+def set_tcoolthrs_field(fields, tcoolthrs):
+    fields.set_field("tcoolthrs", 0 if tcoolthrs is None else tcoolthrs)
+    return ["tcoolthrs"]
 
 
 # Helper to configure StallGuard and CoolStep maximum velocity and
 # SpreadCycle-FullStepping (High velocity) mode threshold.
 def TMCVhighHelper(config, mcu_tmc):
     fields = mcu_tmc.get_fields()
+    fields.velocity_options["high_velocity_threshold"] = set_thigh_field
     velocity = config.getfloat("high_velocity_threshold", None, minval=0.0)
-    thigh = 0
+    thigh = None
     if velocity is not None:
         thigh = TMCtstepHelper(mcu_tmc, velocity, config=config)
-    fields.set_field("thigh", thigh)
+    set_thigh_field(fields, thigh)
+
+
+def set_thigh_field(fields, thigh):
+    fields.set_field("thigh", 0 if thigh is None else thigh)
+    return ["thigh"]

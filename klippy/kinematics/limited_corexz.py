@@ -16,9 +16,24 @@
 from math import atan2, hypot, pi
 from sys import float_info
 
+from .. import config_reload
 from . import corexz
 
 EPSILON = float_info.epsilon
+
+
+# [printer] options RELOAD_CONFIG can apply live (_reload_axis_limits)
+RELOAD_OPTIONS = (
+    "max_velocity",
+    "max_accel",
+    "max_x_velocity",
+    "max_y_velocity",
+    "max_z_velocity",
+    "max_x_accel",
+    "max_y_accel",
+    "max_z_accel",
+    "scale_xy_accel",
+)
 
 
 class LimitedCoreXZKinematics(corexz.CoreXZKinematics):
@@ -40,6 +55,41 @@ class LimitedCoreXZKinematics(corexz.CoreXZKinematics):
         config.get_printer().lookup_object("gcode").register_command(
             "SET_KINEMATICS_LIMIT", self.cmd_SET_KINEMATICS_LIMIT
         )
+        config.register_reload_handler(
+            self._reload_axis_limits, RELOAD_OPTIONS, mid_print_safe=True
+        )
+
+    def _reload_axis_limits(self, config, changed):
+        # RELOAD_CONFIG: like SET_KINEMATICS_LIMIT for the edited values
+        max_velocity = config.getfloat("max_velocity", above=0.0)
+        max_accel = config.getfloat("max_accel", above=0.0)
+        velocities = [
+            config.getfloat("max_%s_velocity" % ax, max_velocity, above=0.0)
+            for ax in "xyz"
+        ]
+        accels = [
+            config.getfloat("max_%s_accel" % ax, max_accel, above=0.0)
+            for ax in "xyz"
+        ]
+        scale_per_axis = config.getboolean("scale_xy_accel", False)
+        follows = config_reload.follows_edit
+
+        def apply():
+            max_velocities = list(self.max_velocities)
+            max_accels = list(self.max_accels)
+            for i, ax in enumerate("xyz"):
+                option = "max_%s_velocity" % ax
+                if follows(config, changed, option, "max_velocity"):
+                    max_velocities[i] = velocities[i]
+                if follows(config, changed, "max_%s_accel" % ax, "max_accel"):
+                    max_accels[i] = accels[i]
+            self.max_velocities = max_velocities
+            self.max_accels = max_accels
+            self.xy_hypot_accel = hypot(*self.max_accels[:2])
+            if "scale_xy_accel" in changed:
+                self.scale_per_axis = scale_per_axis
+
+        return apply
 
     def cmd_SET_KINEMATICS_LIMIT(self, gcmd):
         self.max_velocities = [

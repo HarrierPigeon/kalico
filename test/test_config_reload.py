@@ -26,7 +26,7 @@ def run_gcode(request, config_root, tmp_path):
     dictionary = pathlib.Path.cwd() / request.config.getoption("dictdir")
     dictionary = dictionary / DICTIONARY
 
-    def run(script):
+    def run(script, config_name="printer.cfg"):
         lines = [line.strip() for line in script.strip().splitlines()]
         lines = [line for line in lines if line and not line.startswith("#")]
         gcode_file = tmp_path / "_test_.gcode"
@@ -35,7 +35,7 @@ def run_gcode(request, config_root, tmp_path):
             sys.executable,
             "-m",
             "klippy",
-            str(config_root / "printer.cfg"),
+            str(config_root / config_name),
             "-i",
             str(gcode_file),
             "-o",
@@ -356,4 +356,41 @@ def test_reload_resonance_tester(config_root: ConfigRoot, run_gcode):
         ASSERT_PY TEST='printer.lookup_object("resonance_tester").generator.vibration_generator.accel_per_hz == 60'
         ASSERT_PY TEST='len(printer.lookup_object("resonance_tester").probe_points) == 2'
         """
+    )
+
+
+def test_reload_homing_and_tmc_thresholds(config_root: ConfigRoot, run_gcode):
+    run_gcode(
+        """
+        ASSERT_PY TEST='printer.lookup_object("tmc2209 stepper_x").fields.get_field("en_spreadcycle") == 1'
+        TEST_COPY_FILE SRC=tuning_motion.cfg DEST=tuning.cfg
+        RELOAD_CONFIG
+        ASSERT TEST='{printer.configfile.reload_pending == {}}'
+        ASSERT_PY TEST='printer.lookup_object("toolhead").get_kinematics().rails[0].get_homing_info().speed == 40'
+        ASSERT_PY TEST='printer.lookup_object("toolhead").get_kinematics().rails[0].get_homing_info().position_endstop == 1'
+        # Homing uses the new values
+        G28 X
+        ASSERT TEST='{printer.toolhead.position.x == 1}'
+        # stealthChop below 100 mm/s
+        ASSERT_PY TEST='printer.lookup_object("tmc2209 stepper_x").fields.get_field("en_spreadcycle") == 0'
+        ASSERT_PY TEST='0 < printer.lookup_object("tmc2209 stepper_x").fields.get_field("tpwmthrs") < 0xFFFFF'
+        """
+    )
+
+
+def test_reload_limited_kinematics(config_root: ConfigRoot, run_gcode):
+    run_gcode(
+        """
+        ASSERT_PY TEST='printer.lookup_object("toolhead").get_kinematics().max_accels[1] == 3000'
+        TEST_COPY_FILE SRC=tuning_limited.cfg DEST=tuning.cfg
+        RELOAD_CONFIG
+        ASSERT TEST='{printer.configfile.reload_pending == {}}'
+        ASSERT TEST='{printer.toolhead.max_accel == 4000}'
+        ASSERT_PY TEST='printer.lookup_object("toolhead").get_kinematics().max_accels[1] == 1500'
+        # max_x_accel isn't set, so it follows max_accel
+        ASSERT_PY TEST='printer.lookup_object("toolhead").get_kinematics().max_accels[0] == 4000'
+        ASSERT_PY TEST='printer.lookup_object("toolhead").get_kinematics().scale_per_axis'
+        ASSERT_PY TEST='printer.lookup_object("toolhead").get_kinematics().config_max_accel == 4000'
+        """,
+        config_name="printer_limited.cfg",
     )

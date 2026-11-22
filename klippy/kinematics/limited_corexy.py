@@ -30,6 +30,7 @@
 from math import atan2, pi, sqrt
 from sys import float_info
 
+from .. import config_reload
 from . import corexy
 
 EPSILON = 2 * float_info.epsilon
@@ -49,6 +50,34 @@ class LimitedCoreXYKinematics(corexy.CoreXYKinematics):
             desc=self.cmd_SET_KINEMATICS_LIMIT_help,
         )
         self.supports_dual_carriage = False
+        self._toolhead = toolhead
+        config.register_reload_handler(
+            self._reload_axis_limits,
+            ("max_accel", "max_x_accel", "max_y_accel", "scale_xy_accel"),
+            mid_print_safe=True,
+        )
+
+    def _reload_axis_limits(self, config, changed):
+        # RELOAD_CONFIG: like SET_KINEMATICS_LIMIT for the edited values;
+        # they also become what RESET_VELOCITY_LIMIT returns to
+        max_accel = config.getfloat("max_accel", above=0.0)
+        accels = {
+            attr: config.getfloat(attr, max_accel, above=0)
+            for attr in ("max_x_accel", "max_y_accel")
+        }
+        scale_per_axis = config.getboolean("scale_xy_accel", False)
+
+        def apply():
+            for attr, value in accels.items():
+                if config_reload.follows_edit(
+                    config, changed, attr, "max_accel"
+                ):
+                    setattr(self, attr, value)
+                    self._toolhead.orig_cfg[attr] = value
+            if "scale_xy_accel" in changed:
+                self.scale_per_axis = scale_per_axis
+
+        return apply
 
     cmd_SET_KINEMATICS_LIMIT_help = "Set/get CoreXY per axis velocity limits"
 
