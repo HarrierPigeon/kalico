@@ -248,11 +248,6 @@ class Heater:
         control = self.get_control()
         active = control.get_profile()
         uses_default = active["name"] == "default"
-        if "mpc" in (new_profile["control"], active["control"]):
-            # ControlMPC registers MPC_SET/MPC_CALIBRATE against itself
-            raise config_reload.NeedsRestart(
-                "MPC control can't be rebuilt live"
-            )
         if (
             uses_default
             and isinstance(control, (ControlPID, ControlVelocityPID))

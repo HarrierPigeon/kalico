@@ -9,6 +9,15 @@ FILAMENT_TEMP_SRC_FIXED = "fixed"
 FILAMENT_TEMP_SRC_SENSOR = "sensor"
 
 
+def _active_mpc(heater, gcmd):
+    control = heater.get_control()
+    if not isinstance(control, ControlMPC):
+        raise gcmd.error(
+            "Heater '%s' is not using MPC control" % (heater.get_name(),)
+        )
+    return control
+
+
 class ControlMPC:
     def __init__(self, profile, heater, load_clean=False, register=True):
         self.profile = profile
@@ -32,22 +41,24 @@ class ControlMPC:
         self.printer = heater.printer
         self.toolhead = None
 
-        if not register:
+        if not register or getattr(heater, "mpc_commands_registered", False):
             return
-
+        # Register once per heater and run on whichever ControlMPC is active,
+        # so the controller can be replaced (PID_PROFILE LOAD, RELOAD_CONFIG)
+        heater.mpc_commands_registered = True
         gcode = self.printer.lookup_object("gcode")
         gcode.register_mux_command(
             "MPC_CALIBRATE",
             "HEATER",
             heater.get_name(),
-            self.cmd_MPC_CALIBRATE,
+            lambda gcmd: _active_mpc(heater, gcmd).cmd_MPC_CALIBRATE(gcmd),
             desc=self.cmd_MPC_CALIBRATE_help,
         )
         gcode.register_mux_command(
             "MPC_SET",
             "HEATER",
             heater.get_name(),
-            self.cmd_MPC_SET,
+            lambda gcmd: _active_mpc(heater, gcmd).cmd_MPC_SET(gcmd),
             desc=self.cmd_MPC_SET_help,
         )
 

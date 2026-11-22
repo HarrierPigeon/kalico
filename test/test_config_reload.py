@@ -394,3 +394,23 @@ def test_reload_limited_kinematics(config_root: ConfigRoot, run_gcode):
         """,
         config_name="printer_limited.cfg",
     )
+
+
+def test_reload_mpc(config_root: ConfigRoot, run_gcode):
+    run_gcode(
+        """
+        TEST_COPY_FILE SRC=tuning_mpc.cfg DEST=tuning.cfg
+        RELOAD_CONFIG
+        ASSERT TEST='{printer.configfile.reload_pending == {}}'
+        ASSERT_PY TEST='printer.lookup_object("extruder").get_heater().get_control().const_block_heat_capacity == 20'
+        ASSERT_PY TEST='printer.lookup_object("extruder").get_heater().get_control().const_ambient_transfer == 0.12'
+        # MPC_SET acts on the rebuilt controller
+        MPC_SET HEATER=extruder BLOCK_HEAT_CAPACITY=22
+        ASSERT_PY TEST='printer.lookup_object("extruder").get_heater().get_control().const_block_heat_capacity == 22'
+        # A second rebuild doesn't register the commands again
+        TEST_COPY_FILE SRC=tuning_mpc2.cfg DEST=tuning.cfg
+        RELOAD_CONFIG
+        ASSERT_PY TEST='printer.lookup_object("extruder").get_heater().get_control().const_block_heat_capacity == 25'
+        """,
+        config_name="printer_mpc.cfg",
+    )
