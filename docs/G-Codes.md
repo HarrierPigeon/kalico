@@ -339,6 +339,52 @@ conjunction with other calibration commands to store the results of
 calibration tests.
 If RESTART is set to 0, no restart will be performed !!USE WITH CAUTION!!.
 
+#### RELOAD_CONFIG
+`RELOAD_CONFIG [DRY_RUN=1] [PARTIAL=1] [FORCE=1]`: Reads the config files
+again and applies the options that changed since they were loaded, where
+this can be done without a restart. Only options edited in the file are
+applied; values changed at run-time with other commands (for example
+`SET_VELOCITY_LIMIT`) stay as they are unless that option was edited.
+- If every edit can be applied now, they are applied and listed.
+- If some edits need a `RESTART` (or can't be applied during a print),
+  nothing is applied yet: the command lists what can and can't be
+  applied and waits. Run `RELOAD_CONFIG ACCEPT=1` to apply the edits that
+  can be applied, or `RELOAD_CONFIG ABORT=1` to cancel. `ACCEPT` refuses
+  if the file or the printer's state changed in between.
+- `PARTIAL=1` applies what can be applied straight away, without waiting.
+- While a print is running or paused, only options that are safe to change
+  mid-print are applied. `FORCE=1` applies the others too.
+- `DRY_RUN=1` only lists the edits and what each one needs.
+- If any new value is invalid, nothing is applied.
+
+Edits that are not applied yet show up in the `reload_pending` field of
+the `configfile` status, and as `reload_pending` warnings.
+
+These options can be applied without a restart (safe mid-print unless
+marked otherwise):
+- `[printer]`: `max_velocity`, `max_accel`, `minimum_cruise_ratio`,
+  `square_corner_velocity`, `max_z_velocity`, `max_z_accel`. They also
+  become the values `RESET_VELOCITY_LIMIT` returns to.
+- `[input_shaper]`: `shaper_type`, `shaper_type_x/y`, `shaper_freq_x/y`,
+  `damping_ratio_x/y`.
+- `[tmcXXXX]`: `run_current`, `hold_current`, `home_current`,
+  `current_change_dwell_time`; `driver_XXX` register fields (not safe
+  mid-print).
+- `[extruder]` and `[extruder_stepper]`: `pressure_advance`,
+  `pressure_advance_smooth_time`, `rotation_distance`.
+- Heaters: `smooth_time`, `min_extrude_temp`, and the control profile
+  (`control`, `max_power`, `pid_Kp`, `pid_Ki`, `pid_Kd`, `max_delta`, ...).
+  Changing only the PID gains updates them in place; other changes rebuild
+  the controller, which is not safe mid-print. MPC control needs a restart.
+- `[gcode_macro]`: `gcode`, `description`, `variable_XXX` (not safe
+  mid-print; only edited variables change). New `[gcode_macro]` sections
+  are added.
+- `[delayed_gcode]`: `gcode`.
+
+Everything else, including new or removed sections (other than new macros)
+and anything configured into the micro-controller (pins, `min_temp` and
+`max_temp`, `microsteps`, ...), needs a `RESTART`.
+
 ### [delayed_gcode]
 
 The following command is enabled if a
@@ -894,10 +940,13 @@ This command allows one to change the value of a gcode_macro variable
 at run-time. The provided VALUE is parsed as a Python literal.
 
 #### RELOAD_GCODE_MACROS
-`RELOAD_GCODE_MACROS`: This command reads the config files and reloads
-all previously loaded gcode templates. It does not load new `[gcode_macro]`
-objects or unload deleted ones. Variables modified with SET_GCODE_VARIABLE
-remain unaffected.
+`RELOAD_GCODE_MACROS [FORCE=1]`: Like [RELOAD_CONFIG](#reload_config),
+limited to `[gcode_macro]` and `[delayed_gcode]` sections, and applying
+what it can without waiting for `ACCEPT`. It reloads edited templates and
+descriptions, adds new `[gcode_macro]` sections, and sets the variables
+whose `variable_XXX` option was edited (other variables keep their
+current values). Deleted macros remain until a restart. During a print,
+edited variables are only applied with `FORCE=1`.
 
 ### [gcode_move]
 

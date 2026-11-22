@@ -67,6 +67,50 @@ class ExtruderStepper:
             self.cmd_SYNC_EXTRUDER_MOTION,
             desc=self.cmd_SYNC_EXTRUDER_MOTION_help,
         )
+        config.register_reload_handler(
+            self._reload_pressure_advance,
+            ("pressure_advance", "pressure_advance_smooth_time"),
+            mid_print_safe=True,
+        )
+        config.register_reload_handler(
+            self._reload_rotation_distance,
+            ("rotation_distance",),
+            mid_print_safe=True,
+        )
+
+    def _reload_pressure_advance(self, config, changed):
+        pressure_advance = config.getfloat("pressure_advance", 0.0, minval=0.0)
+        smooth_time = config.getfloat(
+            "pressure_advance_smooth_time",
+            0.040,
+            above=0.0,
+            maxval=get_danger_options().override_pressure_advance_smooth_time_max,
+        )
+
+        def apply():
+            # Same as SET_PRESSURE_ADVANCE for the values that changed
+            pa = self.pressure_advance
+            st = self.pressure_advance_smooth_time
+            if "pressure_advance" in changed:
+                pa = self.config_pa = pressure_advance
+            if "pressure_advance_smooth_time" in changed:
+                st = self.config_smooth_time = smooth_time
+            self._set_pressure_advance(pa, st)
+
+        return apply
+
+    def _reload_rotation_distance(self, config, changed):
+        rotation_dist = config.getfloat("rotation_distance", above=0.0)
+
+        def apply():
+            # Same as SET_EXTRUDER_ROTATION_DISTANCE with a positive distance
+            toolhead = self.printer.lookup_object("toolhead")
+            toolhead.flush_step_generation()
+            self.stepper.set_rotation_distance(rotation_dist)
+            invert_dir, orig_invert_dir = self.stepper.get_dir_inverted()
+            self.stepper.set_dir_inverted(orig_invert_dir)
+
+        return apply
 
     def _handle_connect(self):
         self._set_pressure_advance(self.config_pa, self.config_smooth_time)

@@ -82,6 +82,22 @@ class AxisInputShaper:
         self.params.update(gcmd)
         self.n, self.A, self.T = self.params.get_shaper()
 
+    def reload_params(self, new_params, changed):
+        # RELOAD_CONFIG: take the values whose options changed in the file
+        axis = self.axis
+        if "shaper_type" in changed or "shaper_type_" + axis in changed:
+            self.params.shaper_type = new_params.shaper_type
+        if "damping_ratio_" + axis in changed:
+            self.params.damping_ratio = new_params.damping_ratio
+        if "shaper_freq_" + axis in changed:
+            self.params.shaper_freq = new_params.shaper_freq
+        shaper = self.params.get_shaper()
+        if self.saved is not None:
+            # Shaping is disabled for now; use the new values once re-enabled
+            self.saved = shaper
+        else:
+            self.n, self.A, self.T = shaper
+
     def set_shaper_kinematics(self, sk):
         ffi_main, ffi_lib = chelper.get_ffi()
         success = (
@@ -137,6 +153,16 @@ class InputShaper:
             "SET_INPUT_SHAPER",
             self.cmd_SET_INPUT_SHAPER,
             desc=self.cmd_SET_INPUT_SHAPER_help,
+        )
+        config.register_reload_handler(
+            self._reload_shapers,
+            (
+                "shaper_type",
+                "shaper_type_*",
+                "shaper_freq_*",
+                "damping_ratio_*",
+            ),
+            mid_print_safe=True,
         )
 
     def get_shapers(self):
@@ -217,6 +243,16 @@ class InputShaper:
         for shaper in self.shapers:
             shaper.enable_shaping()
         self._update_input_shaping()
+
+    def _reload_shapers(self, config, changed):
+        new_params = [InputShaperParams(s.axis, config) for s in self.shapers]
+
+        def apply():
+            for shaper, params in zip(self.shapers, new_params):
+                shaper.reload_params(params, changed)
+            self._update_input_shaping()
+
+        return apply
 
     cmd_SET_INPUT_SHAPER_help = "Set cartesian parameters for input shaper"
 

@@ -9,6 +9,7 @@ import logging
 import os
 import threading
 
+from .. import config_reload
 from .control_mpc import (
     FILAMENT_TEMP_SRC_AMBIENT,
     FILAMENT_TEMP_SRC_FIXED,
@@ -40,6 +41,38 @@ PID_PROFILE_OPTIONS = {
 PID_CONTROL_TYPES = ("pid", "pid_v", "dual_loop_pid")
 DUAL_LOOP_PID_INNER_TARGET_OPTION = "inner_target_temp"
 DUAL_LOOP_PID_INNER_TARGET_DEPRECATED_OPTION = "inner_max_temp"
+# Heater section options that make up its control profile and that
+# RELOAD_CONFIG can apply live (Heater._reload_control). filament_diameter is
+# left out because [extruder] also reads it for the extrusion area.
+RELOAD_CONTROL_OPTIONS = (
+    "control",
+    "max_power",
+    "pid_kp",
+    "pid_ki",
+    "pid_kd",
+    "pid_target",
+    "pid_tolerance",
+    "max_delta",
+    "inner_pid_kp",
+    "inner_pid_ki",
+    "inner_pid_kd",
+    "block_heat_capacity",
+    "ambient_transfer",
+    "target_reach_time",
+    "smoothing",
+    "heater_power",
+    "sensor_responsiveness",
+    "min_ambient_change",
+    "steady_state_rate",
+    "filament_density",
+    "filament_heat_capacity",
+    "maximum_retract",
+    "filament_temperature_source",
+    "ambient_temp_sensor",
+    "cooling_fan",
+    "fan_ambient_transfer",
+)
+RELOAD_IN_PLACE_PID_OPTIONS = ("pid_kp", "pid_ki", "pid_kd")
 
 
 def lookup_dual_loop_pid_inner_target_temp(config):
@@ -184,6 +217,107 @@ class Heater:
         self.printer.register_event_handler(
             "klippy:shutdown", self._handle_shutdown
         )
+        # RELOAD_CONFIG support
+        config.register_reload_handler(
+            self._reload_control, RELOAD_CONTROL_OPTIONS, mid_print_safe=True
+        )
+        config.register_reload_handler(
+            self._reload_smooth_time, ("smooth_time",), mid_print_safe=True
+        )
+        config.register_reload_handler(
+            self._reload_min_extrude_temp,
+            ("min_extrude_temp",),
+            mid_print_safe=True,
+        )
+
+    # RELOAD_CONFIG support
+    def _reload_control(self, config, changed):
+        self.check_not_calibrating()
+        for option in ("ambient_temp_sensor", "cooling_fan"):
+            # Parsing an MPC profile loads these; never create one here
+            name = config.get(option, None, note_valid=False)
+            if (
+                name is not None
+                and self.printer.lookup_object(name, None) is None
+            ):
+                raise config_reload.NeedsRestart(
+                    "'%s' is not loaded" % (name,)
+                )
+        max_power = config.getfloat("max_power", 1.0, above=0.0, maxval=1.0)
+        new_profile = self.pmgr.parse_profile(config, "default")
+        control = self.get_control()
+        active = control.get_profile()
+        uses_default = active["name"] == "default"
+        if "mpc" in (new_profile["control"], active["control"]):
+            # ControlMPC registers MPC_SET/MPC_CALIBRATE against itself
+            raise config_reload.NeedsRestart(
+                "MPC control can't be rebuilt live"
+            )
+        if (
+            uses_default
+            and isinstance(control, (ControlPID, ControlVelocityPID))
+            and new_profile["control"] == active["control"]
+            and changed <= set(RELOAD_IN_PLACE_PID_OPTIONS)
+        ):
+            # Only gains changed: update them in place, like SET_HEATER_PID,
+            # so the controller keeps its state
+            def apply_gains():
+                control.Kp = new_profile["pid_kp"] / PID_PARAM_BASE
+                control.Ki = new_profile["pid_ki"] / PID_PARAM_BASE
+                control.Kd = new_profile["pid_kd"] / PID_PARAM_BASE
+                if hasattr(control, "temp_integ_max"):
+                    control.temp_integ_max = 0.0
+                    if control.Ki:
+                        control.temp_integ_max = (
+                            control.heater_max_power / control.Ki
+                        )
+                control.profile = new_profile
+                self.pmgr.profiles["default"] = new_profile
+
+            return apply_gains
+        if changed.mid_print and (uses_default or "max_power" in changed):
+            raise config_reload.UnsafeMidPrint(
+                "rebuilds the heater's controller"
+            )
+
+        def apply():
+            with self.lock:
+                self.max_power = max_power
+                self.min_pwm_change = self.max_power * MIN_PWM_CHANGE_RATIO
+            self.pmgr.profiles["default"] = new_profile
+            if uses_default:
+                self.set_control(self.lookup_control(new_profile))
+            elif "max_power" in changed:
+                # Controllers cache max_power; rebuild the active one
+                self.set_control(self.lookup_control(active))
+
+        return apply
+
+    def _reload_smooth_time(self, config, changed):
+        self.check_not_calibrating()
+        smooth_time = config.getfloat("smooth_time", 1.0, above=0.0)
+
+        def apply():
+            # Same as SET_SMOOTH_TIME
+            self.config_smooth_time = self.smooth_time = smooth_time
+            self.inv_smooth_time = 1.0 / self.smooth_time
+            self.get_control().update_smooth_time()
+
+        return apply
+
+    def _reload_min_extrude_temp(self, config, changed):
+        min_extrude_temp = config.getfloat(
+            "min_extrude_temp",
+            170.0,
+            minval=self.min_temp,
+            maxval=self.max_temp,
+        )
+
+        def apply():
+            # can_extrude follows on the next temperature update
+            self.min_extrude_temp = min_extrude_temp
+
+        return apply
 
     def lookup_control(self, profile, load_clean=False):
         algos = collections.OrderedDict(
@@ -449,6 +583,12 @@ class Heater:
                 )
 
         def _init_profile(self, config_section, name):
+            temp_profile = self.parse_profile(config_section, name)
+            if temp_profile is not None:
+                self.profiles[name] = temp_profile
+            return temp_profile
+
+        def parse_profile(self, config_section, name):
             version = config_section.getint("pid_version", 1)
             if version != PID_PROFILE_VERSION:
                 logging.info(
@@ -611,7 +751,6 @@ class Heater:
                 )
             temp_profile["control"] = control
             temp_profile["name"] = name
-            self.profiles[name] = temp_profile
             return temp_profile
 
         def _check_value_config(self, key, config_section, type, can_be_none):

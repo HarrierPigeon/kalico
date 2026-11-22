@@ -241,6 +241,16 @@ class LookAheadQueue:
 BUFFER_TIME_HIGH = 2.0
 BUFFER_TIME_START = 0.250
 
+# [printer] options RELOAD_CONFIG can apply live (see ToolHead._reload_limits)
+RELOAD_LIMIT_OPTIONS = (
+    "max_velocity",
+    "max_accel",
+    "minimum_cruise_ratio",
+    "square_corner_velocity",
+    "max_z_velocity",
+    "max_z_accel",
+)
+
 
 # Main code to track events (and their timing) on the printer toolhead
 class ToolHead:
@@ -325,6 +335,9 @@ class ToolHead:
             self.orig_cfg["max_z_velocity"] = self.kin.max_z_velocity
         if hasattr(self.kin, "max_z_accel"):
             self.orig_cfg["max_z_accel"] = self.kin.max_z_accel
+        config.register_reload_handler(
+            self._reload_limits, RELOAD_LIMIT_OPTIONS, mid_print_safe=True
+        )
 
         # Register handlers
         self.printer.register_event_handler(
@@ -703,6 +716,51 @@ class ToolHead:
     def set_accel(self, accel):
         self.max_accel = accel
         self._calc_junction_deviation()
+
+    def _reload_limits(self, config, changed):
+        # RELOAD_CONFIG: same effect as SET_VELOCITY_LIMIT, and the new values
+        # also become what RESET_VELOCITY_LIMIT returns to
+        max_velocity = config.getfloat("max_velocity", above=0.0)
+        max_accel = config.getfloat("max_accel", above=0.0)
+        min_cruise_ratio = config.getfloat(
+            "minimum_cruise_ratio", 0.5, below=1.0, minval=0.0
+        )
+        square_corner_velocity = config.getfloat(
+            "square_corner_velocity", 5.0, minval=0.0
+        )
+        new = {
+            "max_velocity": max_velocity,
+            "max_accel": max_accel,
+            "min_cruise_ratio": min_cruise_ratio,
+            "square_corner_velocity": square_corner_velocity,
+        }
+        names = {"min_cruise_ratio": "minimum_cruise_ratio"}
+        updates = {k: v for k, v in new.items() if names.get(k, k) in changed}
+        # Kinematic Z limits default to (and may not exceed) the toolhead's
+        for attr, limit, base in (
+            ("max_z_velocity", max_velocity, "max_velocity"),
+            ("max_z_accel", max_accel, "max_accel"),
+        ):
+            if not hasattr(self.kin, attr):
+                continue
+            value = config.getfloat(attr, limit, above=0.0, maxval=limit)
+            explicit = config.get(attr, None, note_valid=False) is not None
+            if attr in changed or (base in changed and not explicit):
+                updates[attr] = value
+
+        def apply():
+            self.set_max_velocities(
+                updates.get("max_velocity"),
+                updates.get("max_accel"),
+                updates.get("square_corner_velocity"),
+                updates.get("min_cruise_ratio"),
+            )
+            for attr in ("max_z_velocity", "max_z_accel"):
+                if attr in updates:
+                    setattr(self.kin, attr, updates[attr])
+            self.orig_cfg.update(updates)
+
+        return apply
 
 
 # Support common G-Code commands relative to the toolhead

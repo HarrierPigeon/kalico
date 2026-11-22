@@ -15,7 +15,7 @@ import time
 
 import jinja2
 
-from . import mathutil
+from . import config_reload, mathutil
 from .extras.danger_options import get_danger_options
 
 error = configparser.Error
@@ -333,6 +333,19 @@ class ConfigWrapper:
         pconfig = self.printer.lookup_object("configfile")
         pconfig.deprecate(self.section, option, value, msg)
 
+    def register_reload_handler(self, callback, options, mid_print_safe=False):
+        """Let RELOAD_CONFIG apply edits to options of this section live.
+
+        `options` is a list of option names (fnmatch patterns such as
+        "variable_*" work) or a function taking an option name. `callback`
+        gets (config, changed) when any of them changed; see
+        klippy/config_reload.py for the contract.
+        """
+        pconfig = self.printer.lookup_object("configfile")
+        pconfig.register_reload_handler(
+            self.section, options, callback, mid_print_safe
+        )
+
 
 AUTOSAVE_HEADER = """
 #*# <---------------------- SAVE_CONFIG ---------------------->
@@ -355,6 +368,8 @@ class PrinterConfig:
         self.unused_sections = []
         self.unused_options = []
         self.save_config_pending = False
+        self.running_config = None
+        self.reloader = config_reload.ConfigReloader(self)
         # Delimiters differ from gcode_macro's so macro templates (including
         # their {# #} comments) pass through an include untouched
         self.jinja_env = jinja2.Environment(
@@ -377,6 +392,12 @@ class PrinterConfig:
                 "SAVE_CONFIG",
                 self.cmd_SAVE_CONFIG,
                 desc=self.cmd_SAVE_CONFIG_help,
+            )
+        if "RELOAD_CONFIG" not in gcode.ready_gcode_handlers:
+            gcode.register_command(
+                "RELOAD_CONFIG",
+                self.cmd_RELOAD_CONFIG,
+                desc=self.cmd_RELOAD_CONFIG_help,
             )
 
     def get_printer(self):
@@ -585,15 +606,28 @@ class PrinterConfig:
             self._read_config_file(filename), filename
         )
 
-    def read_main_config(self):
+    def _read_main_config_parts(self):
         filename = self.printer.get_start_args()["config_file"]
         data = self._read_config_file(filename)
         regular_data, autosave_data = self._find_autosave_data(data)
         regular_config = self._build_config_wrapper(regular_data, filename)
         autosave_data = self._strip_duplicates(autosave_data, regular_config)
-        self.autosave = self._build_config_wrapper(autosave_data, filename)
+        autosave = self._build_config_wrapper(autosave_data, filename)
         cfg = self._build_config_wrapper(regular_data + autosave_data, filename)
+        return cfg, autosave
+
+    def read_main_config(self):
+        cfg, self.autosave = self._read_main_config_parts()
+        self.running_config = cfg
         return cfg
+
+    def read_new_config(self):
+        """Parse the main config file again without touching the running
+        state (pending SAVE_CONFIG values stay as they are)."""
+        return self._read_main_config_parts()[0]
+
+    def get_running_config(self):
+        return self.running_config
 
     def check_unused_options(self, config, error_on_unused):
         fileconfig = config.fileconfig
@@ -685,13 +719,87 @@ class PrinterConfig:
             self.warn(_type, msg, section)
 
     def get_status(self, eventtime):
+        warnings = self.status_warnings
+        pending = self.reloader.pending
+        if pending:
+            warnings = warnings + self._reload_pending_warnings(pending)
         return {
             "config": self.status_raw_config,
             "settings": self.status_settings,
-            "warnings": self.status_warnings,
+            "warnings": warnings,
             "save_config_pending": self.save_config_pending,
             "save_config_pending_items": self.status_save_pending,
+            "reload_pending": pending,
         }
+
+    def _reload_pending_warnings(self, pending):
+        res = []
+        for section, options in pending.items():
+            if not options:
+                res.append(
+                    {
+                        "type": "reload_pending",
+                        "message": "Section '%s' changed in the config file;"
+                        " RESTART to apply it" % (section,),
+                        "section": section,
+                    }
+                )
+            for option in options:
+                res.append(
+                    {
+                        "type": "reload_pending",
+                        "message": "Option '%s' in section '%s' changed in the"
+                        " config file but is not applied yet"
+                        % (option, section),
+                        "section": section,
+                        "option": option,
+                    }
+                )
+        return res
+
+    # Config reloading (RELOAD_CONFIG)
+    def register_reload_handler(
+        self, section, options, callback, mid_print_safe=False
+    ):
+        self.reloader.register_handler(
+            section, options, callback, mid_print_safe
+        )
+
+    def register_reload_factory(self, prefix, callback, mid_print_safe=False):
+        """Let RELOAD_CONFIG create new '[<prefix> <name>]' sections live.
+        `callback(config, changed)` follows the same contract as a reload
+        handler; its apply function creates the object."""
+        self.reloader.register_factory(prefix, callback, mid_print_safe)
+
+    def note_reloaded(self, changes, tracking):
+        """Update get_status() after RELOAD_CONFIG applied `changes`;
+        `tracking` holds the values the applied handlers read."""
+        if not changes:
+            return
+        raw = dict(self.status_raw_config)
+        for c in changes:
+            opts = raw[c.section] = dict(raw.get(c.section, {}))
+            if c.option is None:
+                continue
+            if c.new is None:
+                opts.pop(c.option, None)
+            else:
+                opts[c.option] = c.new
+        self.status_raw_config = raw
+        settings = dict(self.status_settings)
+        for (section, option), value in tracking.items():
+            if settings.get(section, {}).get(option) == value:
+                continue
+            settings[section] = dict(settings.get(section, {}))
+            settings[section][option] = value
+        self.status_settings = settings
+
+    cmd_RELOAD_CONFIG_help = (
+        "Apply config file edits that can take effect without a restart"
+    )
+
+    def cmd_RELOAD_CONFIG(self, gcmd):
+        self.reloader.run(gcmd)
 
     # Autosave functions
     def set(self, section, option, value):
@@ -872,4 +980,7 @@ class PrinterConfig:
         else:
             # flag config updated to false since config saved with no restart
             self.save_config_pending = False
+            # The saved values are live already; don't offer them to
+            # RELOAD_CONFIG as edits
+            self.reloader.note_saved(self.status_save_pending)
             gcode.respond_info("Config update without restart successful")

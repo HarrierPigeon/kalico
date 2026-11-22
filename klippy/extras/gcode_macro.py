@@ -325,7 +325,13 @@ class PrinterGCodeMacro:
 
         self.gcode = self.printer.lookup_object("gcode")
         self.gcode.register_command(
-            "RELOAD_GCODE_MACROS", self.cmd_RELOAD_GCODE_MACROS
+            "RELOAD_GCODE_MACROS",
+            self.cmd_RELOAD_GCODE_MACROS,
+            desc=self.cmd_RELOAD_GCODE_MACROS_help,
+        )
+        pconfig = self.printer.lookup_object("configfile")
+        pconfig.register_reload_factory(
+            "gcode_macro", self._reload_new_macro, mid_print_safe=True
         )
 
     def load_template(self, config, option, default=None):
@@ -372,22 +378,46 @@ class PrinterGCodeMacro:
             "math": math,
         }
 
-    def cmd_RELOAD_GCODE_MACROS(self, gcmd):
-        pconfig = configfile.PrinterConfig(self.printer)
-        new_config = pconfig.read_main_config()
-        for name, obj in self.printer.lookup_objects("gcode_macro"):
-            try:
-                new_section = new_config.getsection(name)
-            except:
-                continue
+    cmd_RELOAD_GCODE_MACROS_help = (
+        "Apply edits to [gcode_macro] and [delayed_gcode] sections"
+    )
 
-            if name in [
-                s.get_name()
-                for s in new_config.get_prefix_sections("gcode_macro")
-            ]:
-                template = obj.template
-                script_type, new_script = new_section.getscript("gcode")
-                template.reload(script_type, new_script)
+    def cmd_RELOAD_GCODE_MACROS(self, gcmd):
+        # RELOAD_CONFIG limited to macro sections, applying what it can
+        pconfig = self.printer.lookup_object("configfile")
+        pconfig.reloader.run(
+            gcmd,
+            name="RELOAD_GCODE_MACROS",
+            section_filter=_is_macro_section,
+            allow_stage=False,
+        )
+
+    def _reload_new_macro(self, config, changed):
+        # RELOAD_CONFIG: a new [gcode_macro] section; check it fully before
+        # anything is registered
+        name = check_macro_name(config)
+        rename_existing = config.get("rename_existing", None)
+        if (
+            rename_existing is None
+            and name.upper() in self.gcode.ready_gcode_handlers
+        ):
+            raise config.error(
+                "gcode command %s already registered" % (name.upper(),)
+            )
+        self.load_template(config, "gcode")
+        parse_macro_variables(config)
+
+        def apply():
+            macro = GCodeMacro(config)
+            if macro.rename_existing is not None:
+                macro.handle_connect()
+            self.printer.add_object(config.get_name(), macro)
+
+        return apply
+
+
+def _is_macro_section(section):
+    return section.split()[0] in ("gcode_macro", "delayed_gcode")
 
 
 def load_config(config):
@@ -399,14 +429,40 @@ def load_config(config):
 ######################################################################
 
 
+def check_macro_name(config):
+    if len(config.get_name().split()) > 2:
+        raise config.error(
+            "Name of section '%s' contains illegal whitespace"
+            % (config.get_name())
+        )
+    return config.get_name().split()[1]
+
+
+VARIABLE_PREFIX = "variable_"
+
+
+def parse_macro_variable(config, option):
+    try:
+        literal = ast.literal_eval(config.get(option))
+        json.dumps(literal, separators=(",", ":"))
+    except (SyntaxError, TypeError, ValueError) as e:
+        raise config.error(
+            "Option '%s' in section '%s' is not a valid literal: %s"
+            % (option, config.get_name(), e)
+        )
+    return literal
+
+
+def parse_macro_variables(config):
+    return {
+        option[len(VARIABLE_PREFIX) :]: parse_macro_variable(config, option)
+        for option in config.get_prefix_options(VARIABLE_PREFIX)
+    }
+
+
 class GCodeMacro:
     def __init__(self, config):
-        if len(config.get_name().split()) > 2:
-            raise config.error(
-                "Name of section '%s' contains illegal whitespace"
-                % (config.get_name())
-            )
-        name = config.get_name().split()[1]
+        name = check_macro_name(config)
         self.alias = name.upper()
         self.printer = printer = config.get_printer()
         gcode_macro = printer.load_object(config, "gcode_macro")
@@ -437,18 +493,50 @@ class GCodeMacro:
             desc=self.cmd_SET_GCODE_VARIABLE_help,
         )
         self.in_script = False
-        self.variables = {}
-        prefix = "variable_"
-        for option in config.get_prefix_options(prefix):
-            try:
-                literal = ast.literal_eval(config.get(option))
-                json.dumps(literal, separators=(",", ":"))
-                self.variables[option[len(prefix) :]] = literal
-            except (SyntaxError, TypeError, ValueError) as e:
-                raise config.error(
-                    "Option '%s' in section '%s' is not a valid literal: %s"
-                    % (option, config.get_name(), e)
-                )
+        self.variables = parse_macro_variables(config)
+        # RELOAD_CONFIG support
+        config.register_reload_handler(
+            self._reload_script, ("gcode", "description"), mid_print_safe=True
+        )
+        config.register_reload_handler(
+            self._reload_variables, (VARIABLE_PREFIX + "*",)
+        )
+
+    def _reload_script(self, config, changed):
+        gcode_macro = self.printer.lookup_object("gcode_macro")
+        script_type, script = config.getscript("gcode")
+        # Compile it now so a syntax error rejects the whole reload
+        gcode_macro.load_template(config, "gcode")
+        desc = config.get("description", "G-Code macro")
+
+        def apply():
+            if "gcode" in changed:
+                self.template.reload(script_type, script)
+            if "description" in changed:
+                self.cmd_desc = desc
+                self.gcode.set_command_help(self.alias, desc)
+
+        return apply
+
+    def _reload_variables(self, config, changed):
+        # Only the variables edited in the file; the rest keep their values
+        updates = {}
+        removed = []
+        for option in changed:
+            name = option[len(VARIABLE_PREFIX) :]
+            if config.get(option, None, note_valid=False) is None:
+                removed.append(name)
+            else:
+                updates[name] = parse_macro_variable(config, option)
+
+        def apply():
+            variables = dict(self.variables)
+            variables.update(updates)
+            for name in removed:
+                variables.pop(name, None)
+            self.variables = variables
+
+        return apply
 
     def handle_connect(self):
         prev_cmd = self.gcode.register_command(self.alias, None)

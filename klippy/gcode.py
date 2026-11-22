@@ -539,6 +539,10 @@ class GCodeDispatch:
     def get_status(self, eventtime):
         return {"commands": self.status_commands}
 
+    def set_command_help(self, cmd, desc):
+        self.gcode_help[cmd] = desc
+        self._build_status_commands()
+
     def _build_status_commands(self):
         commands = {cmd: {} for cmd in self.gcode_handlers}
         for cmd in self.gcode_help:

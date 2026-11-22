@@ -19,6 +19,7 @@
 
 ## Enhanced behavior
 
+- New [`RELOAD_CONFIG`](./G-Codes.md#reload_config) G-Code command applies config file edits that don't need a restart (velocity limits, input shaper, TMC currents and fields, pressure advance, heater PID, macros, ...) and lists the ones that do.
 - [`SET_NOZZLE_DIAMETER`](./G-Codes.md#set_nozzle_diameter) changes an extruder's nozzle diameter (and optionally its max extrusion cross section) at runtime, e.g. for toolheads with different nozzles or a high-flow purge line.
 - [`canbus_query.py`](./CANBUS.md#finding-the-canbus_uuid-for-new-micro-controllers) now responds with all Kalico devices, even after they've been assigned a node_id.
 - Input shaper calibration now warns about active fans that may affect measurement accuracy.
@@ -73,7 +74,7 @@
 
 - The jinja `do` extension has been enabled. You can now call functions in your macros without resorting to dirty hacks: `{% do array.append(5) %}`
 - The python [`math`](https://docs.python.org/3/library/math.html) library is available to macros. `{math.sin(math.pi * variable)}` and more!
-- New [`RELOAD_GCODE_MACROS`](./G-Codes.md#reload_gcode_macros) G-Code command to reload `[gcode_macro]` templates without requiring a restart.
+- New [`RELOAD_GCODE_MACROS`](./G-Codes.md#reload_gcode_macros) G-Code command to reload `[gcode_macro]` templates and variables, and add new macros, without requiring a restart.
 - G-Code Macros can be written in Python. Read more [here](./Command_Templates.md)
   - Macros may also be loaded from other files, using `!!include path/to/file.py`
 - Inside a macro you can use `RETURN` to end macro execution early without raising an error.

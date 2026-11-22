@@ -36,6 +36,20 @@ class DelayedGcode:
             self.cmd_UPDATE_DELAYED_GCODE,
             desc=self.cmd_desc,
         )
+        config.register_reload_handler(
+            self._reload_script, ("gcode",), mid_print_safe=True
+        )
+
+    def _reload_script(self, config, changed):
+        # RELOAD_CONFIG: compile now so a syntax error rejects the reload
+        gcode_macro = self.printer.lookup_object("gcode_macro")
+        gcode_macro.load_template(config, "gcode")
+        script_type, script = config.getscript("gcode")
+
+        def apply():
+            self.timer_gcode.reload(script_type, script)
+
+        return apply
 
     def _handle_ready(self):
         waketime = self.reactor.NEVER

@@ -139,7 +139,11 @@ class Printer:
             "pins": SimpleNamespace(register_chip=lambda *args: None),
             "toolhead": Toolhead(),
             "gcode_move": SimpleNamespace(),
-            "configfile": SimpleNamespace(set=self.save),
+            "configfile": SimpleNamespace(
+                set=self.save,
+                register_reload_handler=lambda *args, **kwargs: None,
+                register_reload_factory=lambda *args, **kwargs: None,
+            ),
             "gcode_macro": SimpleNamespace(load_template=lambda *args: None),
         }
         self.objects["gcode"].printer = self

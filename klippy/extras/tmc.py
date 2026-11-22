@@ -41,6 +41,8 @@ class FieldHelper:
         self.field_to_register = {
             f: r for r, fields in self.all_fields.items() for f in fields
         }
+        # Fields read from "driver_<FIELD>" config options, with defaults
+        self.config_fields = {}
 
     def lookup_register(self, field_name, default=None):
         return self.field_to_register.get(field_name, default)
@@ -73,6 +75,13 @@ class FieldHelper:
 
     def set_config_field(self, config, field_name, default):
         # Allow a field to be set from the config file
+        self.config_fields[field_name] = default
+        val = self.parse_config_field(config, field_name, default)
+        if default is None and val is None:
+            return
+        return self.set_field(field_name, val)
+
+    def parse_config_field(self, config, field_name, default):
         config_name = "driver_" + field_name.upper()
         reg_name = self.field_to_register[field_name]
         mask = self.all_fields[reg_name][field_name]
@@ -88,9 +97,7 @@ class FieldHelper:
             )
         else:
             val = config.getint(config_name, default, minval=0, maxval=maxval)
-        if default is None and val is None:
-            return
-        return self.set_field(field_name, val)
+        return val
 
     def pretty_format(self, reg_name, reg_value):
         # Provide a string description of a register
@@ -391,6 +398,15 @@ class TMCStallguardDump:
 ######################################################################
 
 
+# Current options RELOAD_CONFIG can apply live (TMCCommandHelper)
+RELOAD_CURRENT_OPTIONS = (
+    "run_current",
+    "hold_current",
+    "home_current",
+    "current_change_dwell_time",
+)
+
+
 class TMCCommandHelper:
     def __init__(
         self,
@@ -457,6 +473,13 @@ class TMCCommandHelper:
             self.cmd_SET_TMC_CURRENT,
             desc=self.cmd_SET_TMC_CURRENT_help,
         )
+        # RELOAD_CONFIG support
+        config.register_reload_handler(
+            self._reload_currents, RELOAD_CURRENT_OPTIONS, mid_print_safe=True
+        )
+        config.register_reload_handler(
+            self._reload_fields, self._is_reloadable_field
+        )
 
     def _init_registers(self, print_time=None):
         if self.init_callback is not None:
@@ -465,6 +488,75 @@ class TMCCommandHelper:
         for reg_name in list(self.fields.registers.keys()):
             val = self.fields.registers[reg_name]  # Val may change during loop
             self.mcu_tmc.set_register(reg_name, val, print_time)
+
+    # RELOAD_CONFIG support
+    def _reload_currents(self, config, changed):
+        ch = self.current_helper
+        run_current, hold_current, home_current, dwell_time = (
+            ch.read_config_currents(config, ch.max_current)
+        )
+
+        def apply():
+            # Same as SET_TMC_CURRENT for the currents that changed
+            cur = ch.get_current()
+            new_run, new_hold = cur[0], cur[2]
+            if "run_current" in changed:
+                ch.config_run_current = new_run = run_current
+                ch.set_run_current(run_current)
+            if "hold_current" in changed:
+                ch.config_hold_current = new_hold = hold_current
+            if "home_current" in changed or (
+                "run_current" in changed
+                and config.get("home_current", None, note_valid=False) is None
+            ):
+                ch.config_home_current = home_current
+                ch.set_home_current(home_current)
+            if "current_change_dwell_time" in changed:
+                ch.current_change_dwell_time = dwell_time
+            toolhead = self.printer.lookup_object("toolhead")
+            ch.set_current(new_run, new_hold, toolhead.get_last_move_time())
+
+        return apply
+
+    def _is_reloadable_field(self, option):
+        return (
+            option.startswith("driver_")
+            and option[len("driver_") :] in self.fields.config_fields
+        )
+
+    def _reload_fields(self, config, changed):
+        updates = []
+        for option in sorted(changed):
+            field = option[len("driver_") :]
+            default = self.fields.config_fields[field]
+            value = self.fields.parse_config_field(config, field, default)
+            if value is not None:
+                updates.append((field, value))
+
+        def apply():
+            enable_line = self.stepper_enable.lookup_enable(self.stepper_name)
+            enabled = enable_line.is_motor_enabled()
+            reg_names = []
+            for field, value in updates:
+                if field == "toff" and self.toff is not None:
+                    # Virtual enable: toff is only in the register while the
+                    # motor is enabled
+                    self.toff = value
+                    if not enabled:
+                        continue
+                self.fields.set_field(field, value)
+                reg_name = self.fields.lookup_register(field)
+                if reg_name not in reg_names:
+                    reg_names.append(reg_name)
+            print_time = self.printer.lookup_object(
+                "toolhead"
+            ).get_last_move_time()
+            for reg_name in reg_names:
+                self.mcu_tmc.set_register(
+                    reg_name, self.fields.registers[reg_name], print_time
+                )
+
+        return apply
 
     cmd_INIT_TMC_help = "Initialize TMC stepper driver registers"
 
@@ -1042,21 +1134,12 @@ class BaseTMCCurrentHelper:
 
         # config_{run|hold|home}_current
         # represents an initial value set via config file
-        self.config_run_current = config.getfloat(
-            "run_current", above=0.0, maxval=max_current
-        )
-        self.config_hold_current = config.getfloat(
-            "hold_current", max_current, above=0.0, maxval=max_current
-        )
-        self.config_home_current = config.getfloat(
-            "home_current",
+        (
             self.config_run_current,
-            above=0.0,
-            maxval=max_current,
-        )
-        self.current_change_dwell_time = config.getfloat(
-            "current_change_dwell_time", 0.5, above=0.0
-        )
+            self.config_hold_current,
+            self.config_home_current,
+            self.current_change_dwell_time,
+        ) = self.read_config_currents(config, max_current)
 
         # req_{run|hold|home}_current
         # represents a requested value, which starts with
@@ -1072,6 +1155,22 @@ class BaseTMCCurrentHelper:
         self.actual_current = self.req_run_current
 
         self.max_current = max_current
+
+    @staticmethod
+    def read_config_currents(config, max_current):
+        run_current = config.getfloat(
+            "run_current", above=0.0, maxval=max_current
+        )
+        hold_current = config.getfloat(
+            "hold_current", max_current, above=0.0, maxval=max_current
+        )
+        home_current = config.getfloat(
+            "home_current", run_current, above=0.0, maxval=max_current
+        )
+        dwell_time = config.getfloat(
+            "current_change_dwell_time", 0.5, above=0.0
+        )
+        return run_current, hold_current, home_current, dwell_time
 
     def needs_home_current_change(self):
         needs = self.actual_current != self.req_home_current
