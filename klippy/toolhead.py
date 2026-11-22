@@ -7,7 +7,7 @@ import importlib
 import logging
 import math
 
-from . import chelper
+from . import chelper, config_reload
 from .extras.danger_options import get_danger_options
 from .kinematics import extruder as kinematics_extruder
 
@@ -744,8 +744,7 @@ class ToolHead:
             if not hasattr(self.kin, attr):
                 continue
             value = config.getfloat(attr, limit, above=0.0, maxval=limit)
-            explicit = config.get(attr, None, note_valid=False) is not None
-            if attr in changed or (base in changed and not explicit):
+            if config_reload.follows_edit(config, changed, attr, base):
                 updates[attr] = value
 
         def apply():

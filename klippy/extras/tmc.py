@@ -6,7 +6,7 @@
 import collections
 import logging
 
-from klippy import mcu, stepper
+from klippy import config_reload, mcu, stepper
 
 from . import bulk_sensor
 
@@ -505,9 +505,8 @@ class TMCCommandHelper:
                 ch.set_run_current(run_current)
             if "hold_current" in changed:
                 ch.config_hold_current = new_hold = hold_current
-            if "home_current" in changed or (
-                "run_current" in changed
-                and config.get("home_current", None, note_valid=False) is None
+            if config_reload.follows_edit(
+                config, changed, "home_current", "run_current"
             ):
                 ch.config_home_current = home_current
                 ch.set_home_current(home_current)

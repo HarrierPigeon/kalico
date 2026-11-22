@@ -327,3 +327,19 @@ def test_baseline_leaves_unused_constants_reported(
         pconfig.check_unused_options(config, error_on_unused=False)
         assert ("constants", "stray") in pconfig.unused_options
         assert ("constants", "used") not in pconfig.unused_options
+
+
+def test_status_only_takes_claimed_options(config_root: ConfigRoot, run_gcode):
+    # A handler that also reads an option it doesn't claim (Shake&Tune's
+    # re-reads its whole section) must not put that value in settings
+    run_gcode(
+        """
+        TEST_PY CODE='printer.lookup_object("configfile").register_reload_handler("extruder", ("pressure_advance",), lambda config, changed: config.getfloat("nozzle_diameter") and None)'
+        TEST_COPY_FILE SRC=tuning_unclaimed_read.cfg DEST=tuning.cfg
+        RELOAD_CONFIG PARTIAL=1
+        ASSERT TEST='{printer.extruder.pressure_advance == 0.05}'
+        ASSERT TEST='{printer.configfile.settings.extruder.pressure_advance == 0.05}'
+        ASSERT TEST='{printer.configfile.settings.extruder.nozzle_diameter == 0.4}'
+        ASSERT TEST='{printer.configfile.reload_pending.extruder.nozzle_diameter == "0.6"}'
+        """
+    )

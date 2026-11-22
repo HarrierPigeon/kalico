@@ -72,6 +72,19 @@ class ReloadRequest(frozenset):
         return self
 
 
+def follows_edit(config, changed, option, default_from=None):
+    """True if a handler should re-apply `option`: it was edited, or it is
+    not set in the file and `default_from`, the option its default is
+    derived from, was edited."""
+    if option in changed:
+        return True
+    return (
+        default_from is not None
+        and default_from in changed
+        and config.get(option, None, note_valid=False) is None
+    )
+
+
 class _Handler:
     def __init__(self, section, options, callback, mid_print_safe):
         self.section = section
@@ -143,11 +156,12 @@ def _is_long(value):
 
 
 class _Call:
-    def __init__(self, callback, section, changes, is_factory=False):
+    def __init__(self, callback, section, changes, handler=None):
         self.callback = callback
         self.section = section
         self.changes = changes
-        self.is_factory = is_factory
+        # None for a section factory, which owns every option of its section
+        self.handler = handler
         self.apply_fn = None
         # (section, option) -> value the callback read, for get_status()
         self.tracking = {}
@@ -295,7 +309,7 @@ class ConfigReloader:
             c.status = status
         if status == APPLY:
             plan.calls.append(
-                _Call(factory.callback, section, changes, is_factory=True)
+                _Call(factory.callback, section, changes)
             )
 
     def _plan_section(self, plan, section, old, new):
@@ -316,7 +330,7 @@ class ConfigReloader:
             change.status = APPLY
             for h in claimers:
                 if h not in calls:
-                    calls[h] = _Call(h.callback, section, [])
+                    calls[h] = _Call(h.callback, section, [], handler=h)
                     plan.calls.append(calls[h])
                 calls[h].changes.append(change)
 
@@ -375,7 +389,11 @@ class ConfigReloader:
                 failures.append("[%s]: %s" % (call.section, e))
                 continue
             applied.extend(changes)
-            tracking.update(call.tracking)
+            # Only what this handler owns: it may also read options that
+            # are still waiting for a restart
+            for (section, option), value in call.tracking.items():
+                if call.handler is None or call.handler.claims(option):
+                    tracking[(section, option)] = value
         for c in applied:
             c.applied = True
         if not file_edit:
