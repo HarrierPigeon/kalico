@@ -414,3 +414,36 @@ def test_reload_mpc(config_root: ConfigRoot, run_gcode):
         """,
         config_name="printer_mpc.cfg",
     )
+
+
+def test_reload_prompt_dialog(config_root: ConfigRoot, run_gcode):
+    # The warning shows Klipper's host prompt dialog (Mainsail, Fluidd,
+    # KlipperScreen), one action per response, and ends it afterwards
+    capture = (
+        "printer.prompt_log = []; "
+        'printer.lookup_object("gcode").register_output_handler('
+        "printer.prompt_log.append)"
+    )
+    run_gcode(
+        "TEST_PY CODE='" + capture + "'\n"
+        """
+        TEST_COPY_FILE SRC=tuning_mixed.cfg DEST=tuning.cfg
+        RELOAD_CONFIG
+        ASSERT_PY TEST='"// action:prompt_begin Apply config edits?" in printer.prompt_log'
+        ASSERT_PY TEST='any(m.startswith("// action:prompt_text 1 edit(s) can apply now; 1 need a RESTART ([stepper_x] position_max)") for m in printer.prompt_log)'
+        ASSERT_PY TEST='"// action:prompt_footer_button Apply 1 now|RELOAD_CONFIG ACCEPT=1|primary" in printer.prompt_log'
+        ASSERT_PY TEST='"// action:prompt_footer_button Cancel|RELOAD_CONFIG ABORT=1|secondary" in printer.prompt_log'
+        ASSERT_PY TEST='printer.prompt_log.index("// action:prompt_show") > printer.prompt_log.index("// action:prompt_begin Apply config edits?")'
+        ASSERT_PY TEST='all("\\n" not in m for m in printer.prompt_log if "action:" in m)'
+        RELOAD_CONFIG ACCEPT=1
+        ASSERT_PY TEST='"// action:prompt_end" in printer.prompt_log'
+        ASSERT TEST='{printer.toolhead.max_accel == 5000}'
+        # PROMPT=0: the warning only goes to the console
+        TEST_PY CODE='printer.prompt_log.clear()'
+        TEST_COPY_FILE SRC=tuning_mixed2.cfg DEST=tuning.cfg
+        RELOAD_CONFIG PROMPT=0
+        ASSERT_PY TEST='not any("action:prompt" in m for m in printer.prompt_log)'
+        RELOAD_CONFIG ABORT=1
+        ASSERT TEST='{printer.toolhead.max_accel == 5000}'
+        """
+    )

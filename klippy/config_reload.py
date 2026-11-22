@@ -45,6 +45,8 @@ RESTART = "restart"
 FAILED = "failed"
 
 MAX_VALUE_DISPLAY = 40
+# Changes named in the dialog's one-line summary before "and N more"
+PROMPT_MAX_NAMES = 3
 # Sections that are only read through ${...} interpolation; their dependents
 # show up in the comparison with their interpolated values instead.
 IGNORED_SECTIONS = ("constants",)
@@ -214,6 +216,8 @@ class ConfigReloader:
         self.staged = None
         # {section: {option: new value or None}} still waiting for a restart
         self.pending = {}
+        # A host prompt dialog (action:prompt_*) is showing the staged plan
+        self.prompt_open = False
 
     # Registration
     def register_handler(self, section, options, callback, mid_print_safe):
@@ -446,7 +450,7 @@ class ConfigReloader:
             if not changes:
                 continue
             lines.append(title)
-            lines.extend("  " + c.describe() for c in changes)
+            lines.extend("- " + c.describe() for c in changes)
         return "\n".join(lines)
 
     # SET_CONFIG
@@ -505,6 +509,46 @@ class ConfigReloader:
             msg += "\nRun SAVE_CONFIG to write it to the config file."
         gcmd.respond_info(msg)
 
+    # Dialog for the warning (Klipper's host prompts: Mainsail, Fluidd and
+    # KlipperScreen show them). KlipperScreen keeps only the last
+    # prompt_text and every action must be its own response.
+    def _show_prompt(self, gcmd, name, plan):
+        applicable = plan.by_status(APPLY)
+        parts = ["%d edit(s) can apply now" % (len(applicable),)]
+        for status, what in (
+            (RESTART, "need a RESTART"),
+            (BLOCKED, "not applied during a print"),
+        ):
+            changes = plan.by_status(status)
+            if not changes:
+                continue
+            names = [
+                "[%s] %s" % (c.section, c.option)
+                if c.option
+                else "[%s]" % (c.section,)
+                for c in changes
+            ]
+            if len(names) > PROMPT_MAX_NAMES:
+                extra = len(names) - PROMPT_MAX_NAMES
+                names = names[:PROMPT_MAX_NAMES] + ["%d more" % (extra,)]
+            parts.append("%d %s (%s)" % (len(changes), what, ", ".join(names)))
+        text = "; ".join(parts) + ". Details are in the console."
+        for line in (
+            "prompt_begin Apply config edits?",
+            "prompt_text " + text.replace("|", "/"),
+            "prompt_footer_button Cancel|%s ABORT=1|secondary" % (name,),
+            "prompt_footer_button Apply %d now|%s ACCEPT=1|primary"
+            % (len(applicable), name),
+            "prompt_show",
+        ):
+            gcmd.respond_raw("// action:" + line)
+        self.prompt_open = True
+
+    def _end_prompt(self, gcmd, force=False):
+        if self.prompt_open or force:
+            gcmd.respond_raw("// action:prompt_end")
+        self.prompt_open = False
+
     # Command
     def run(
         self,
@@ -514,6 +558,7 @@ class ConfigReloader:
         allow_stage=True,
     ):
         if gcmd.get_int("ABORT", 0, minval=0, maxval=1):
+            self._end_prompt(gcmd, force=True)
             if self.staged is None:
                 gcmd.respond_info("%s: nothing to cancel" % (name,))
             else:
@@ -524,8 +569,11 @@ class ConfigReloader:
         dry_run = gcmd.get_int("DRY_RUN", 0, minval=0, maxval=1)
         partial = gcmd.get_int("PARTIAL", 0, minval=0, maxval=1)
         force = gcmd.get_int("FORCE", 0, minval=0, maxval=1)
+        prompt = gcmd.get_int("PROMPT", 1, minval=0, maxval=1)
         staged = None
         if accept:
+            # Whatever happens next, the dialog is done with
+            self._end_prompt(gcmd, force=True)
             staged, self.staged = self.staged, None
             if staged is None or staged[0] != name:
                 raise gcmd.error(
@@ -553,6 +601,7 @@ class ConfigReloader:
         if not dry_run:
             # A new run replaces any plan still waiting for ACCEPT
             self.staged = None
+            self._end_prompt(gcmd)
         self._update_pending(plan, section_filter)
         if not plan.changes:
             gcmd.respond_info("%s: no changes" % (name,))
@@ -576,6 +625,8 @@ class ConfigReloader:
                 " now, or %s ABORT=1 to cancel." % (name, len(applicable), name)
             )
             gcmd.respond_info(msg)
+            if prompt:
+                self._show_prompt(gcmd, name, plan)
             return
         failures = self.apply_plan(plan) if applicable else []
         self._update_pending(plan, section_filter)

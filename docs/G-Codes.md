@@ -340,7 +340,7 @@ calibration tests.
 If RESTART is set to 0, no restart will be performed !!USE WITH CAUTION!!.
 
 #### RELOAD_CONFIG
-`RELOAD_CONFIG [DRY_RUN=1] [PARTIAL=1] [FORCE=1]`: Reads the config files
+`RELOAD_CONFIG [DRY_RUN=1] [PARTIAL=1] [FORCE=1] [PROMPT=0]`: Reads the config files
 again and applies the options that changed since they were loaded, where
 this can be done without a restart. Only options edited in the file are
 applied; values changed at run-time with other commands (for example
@@ -350,7 +350,11 @@ applied; values changed at run-time with other commands (for example
   nothing is applied yet: the command lists what can and can't be
   applied and waits. Run `RELOAD_CONFIG ACCEPT=1` to apply the edits that
   can be applied, or `RELOAD_CONFIG ABORT=1` to cancel. `ACCEPT` refuses
-  if the file or the printer's state changed in between.
+  if the file or the printer's state changed in between. The warning is
+  also shown as a dialog with Apply and Cancel buttons in Mainsail, Fluidd
+  and KlipperScreen (Klipper's `action:prompt` host prompts); `PROMPT=0`
+  leaves it in the console only. Closing the dialog without a button
+  leaves the plan waiting until the next `RELOAD_CONFIG`.
 - `PARTIAL=1` applies what can be applied straight away, without waiting.
 - While a print is running or paused, only options that are safe to change
   mid-print are applied. `FORCE=1` applies the others too.
@@ -364,22 +368,33 @@ These options can be applied without a restart (safe mid-print unless
 marked otherwise):
 - `[printer]`: `max_velocity`, `max_accel`, `minimum_cruise_ratio`,
   `square_corner_velocity`, `max_z_velocity`, `max_z_accel`. They also
-  become the values `RESET_VELOCITY_LIMIT` returns to.
+  become the values `RESET_VELOCITY_LIMIT` returns to. With the
+  `limited_*` kinematics also `max_x/y/z_velocity`, `max_x/y/z_accel`
+  and `scale_xy_accel`.
+- `[stepper_*]`: `position_endstop` (not where the endstop sets it, or on
+  delta printers), `homing_speed`, `second_homing_speed`,
+  `homing_retract_speed`, `homing_retract_dist`, `homing_positive_dir`,
+  `min_home_dist`, `homing_accel`. They take effect at the next homing.
 - `[input_shaper]`: `shaper_type`, `shaper_type_x/y`, `shaper_freq_x/y`,
   `damping_ratio_x/y`.
 - `[tmcXXXX]`: `run_current`, `hold_current`, `home_current`,
-  `current_change_dwell_time`; `driver_XXX` register fields (not safe
-  mid-print).
+  `current_change_dwell_time`; `driver_XXX` register fields,
+  `stealthchop_threshold`, `coolstep_threshold` and
+  `high_velocity_threshold` (not safe mid-print).
 - `[extruder]` and `[extruder_stepper]`: `pressure_advance`,
   `pressure_advance_smooth_time`, `rotation_distance`.
 - Heaters: `smooth_time`, `min_extrude_temp`, and the control profile
   (`control`, `max_power`, `pid_Kp`, `pid_Ki`, `pid_Kd`, `max_delta`, ...).
-  Changing only the PID gains updates them in place; other changes rebuild
-  the controller, which is not safe mid-print. MPC control needs a restart.
+  Changing only the PID gains updates them in place; other changes,
+  including MPC parameters, rebuild the controller, which is not safe
+  mid-print.
 - `[gcode_macro]`: `gcode`, `description`, `variable_XXX` (not safe
   mid-print; only edited variables change). New `[gcode_macro]` sections
   are added.
 - `[delayed_gcode]`: `gcode`.
+- `[resonance_tester]`: `move_speed`, `min_freq`, `max_freq`,
+  `accel_per_hz`, `hz_per_sec`, `sweeping_accel`, `sweeping_period`,
+  `max_smoothing`, `probe_points`.
 
 Everything else, including new or removed sections (other than new macros)
 and anything configured into the micro-controller (pins, `min_temp` and
