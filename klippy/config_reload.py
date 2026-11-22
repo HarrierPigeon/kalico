@@ -171,7 +171,7 @@ class ReloadPlan:
         return [c for c in self.changes if c.status in (RESTART, BLOCKED)]
 
 
-def _snapshot(fileconfig):
+def snapshot(fileconfig):
     """Return {section: {option: value}}, with ${...} interpolated."""
     out = {}
     for section in fileconfig.sections():
@@ -193,8 +193,9 @@ class ConfigReloader:
         self.printer = pconfig.get_printer()
         self.handlers = []
         self.factories = []
-        # What the running printer was built from (plus applied reloads);
-        # taken lazily from the running config on first use
+        # What the running printer was built from (plus applied reloads).
+        # PrinterConfig sets it when it parses the file, before any module
+        # can add to the running config (Shake&Tune injects macro sections)
         self.baseline = None
         self.staged = None
         # {section: {option: new value or None}} still waiting for a restart
@@ -218,10 +219,14 @@ class ConfigReloader:
         state = print_stats.get_status(eventtime).get("state")
         return state in ("printing", "paused")
 
+    def set_baseline(self, values):
+        self.baseline = values
+        self.staged = None
+        self.pending = {}
+
     def _get_baseline(self):
         if self.baseline is None:
-            running = self.pconfig.get_running_config()
-            self.baseline = _snapshot(running.fileconfig)
+            raise error("RELOAD_CONFIG: the running config is unknown")
         return self.baseline
 
     def note_saved(self, saved):
@@ -241,7 +246,7 @@ class ConfigReloader:
     def build_plan(self, force=False, section_filter=None):
         new_config = self.pconfig.read_new_config()
         old_values = self._get_baseline()
-        new_values = _snapshot(new_config.fileconfig)
+        new_values = snapshot(new_config.fileconfig)
         mid_print = self._is_printing() and not force
         plan = ReloadPlan(new_config, mid_print)
         sections = list(new_values)

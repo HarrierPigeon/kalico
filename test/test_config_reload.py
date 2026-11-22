@@ -11,10 +11,14 @@ import sys
 import typing
 
 import pytest
+from klippy_testing import PrinterShim
 
 ROOT = pathlib.Path(__file__).parent.parent
 DICTIONARY = "stm32f446.dict"
 ConfigRoot = typing.Annotated[pathlib.Path, "test_configs/config_reload"]
+ConstantsRoot = typing.Annotated[
+    pathlib.Path, "test_configs/config_reload_constants"
+]
 
 
 @pytest.fixture
@@ -296,3 +300,30 @@ def test_set_config(config_root: ConfigRoot, run_gcode):
         ASSERT TEST='{printer.toolhead.max_accel == 4000}'
         """
     )
+
+
+def test_reload_ignores_sections_added_at_runtime(
+    config_root: ConfigRoot, run_gcode
+):
+    # Shake&Tune adds its dummy macros to the running config at startup;
+    # those must not look like sections removed from the file
+    run_gcode(
+        """
+        TEST_PY CODE='printer.lookup_object("configfile").get_running_config().fileconfig.add_section("gcode_macro INJECTED")'
+        RELOAD_CONFIG
+        ASSERT TEST='{printer.configfile.reload_pending == {}}'
+        """
+    )
+
+
+def test_baseline_leaves_unused_constants_reported(
+    config_root: ConstantsRoot,
+):
+    start_args = {"config_file": str(config_root / "printer.cfg")}
+    with PrinterShim(start_args) as printer:
+        config = printer.load_config()
+        config.getsection("printer").get("value")
+        pconfig = printer.lookup_object("configfile")
+        pconfig.check_unused_options(config, error_on_unused=False)
+        assert ("constants", "stray") in pconfig.unused_options
+        assert ("constants", "used") not in pconfig.unused_options

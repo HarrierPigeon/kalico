@@ -624,7 +624,23 @@ class PrinterConfig:
     def read_main_config(self):
         cfg, self.autosave = self._read_main_config_parts()
         self.running_config = cfg
+        # RELOAD_CONFIG compares later edits with the file as read now
+        self.reloader.set_baseline(self._untracked_values(cfg.fileconfig))
         return cfg
+
+    @staticmethod
+    def _untracked_values(fileconfig):
+        # Reading every option interpolates every ${...}; don't let that
+        # count as using a constant (check_unused_options reports those)
+        interpolation = getattr(fileconfig, "_interpolation", None)
+        if not isinstance(interpolation, SectionInterpolation):
+            return config_reload.snapshot(fileconfig)
+        tracking = interpolation.access_tracking
+        interpolation.access_tracking = {}
+        try:
+            return config_reload.snapshot(fileconfig)
+        finally:
+            interpolation.access_tracking = tracking
 
     def read_new_config(self):
         """Parse the main config file again without touching the running
